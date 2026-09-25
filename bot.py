@@ -623,10 +623,17 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
             return
 
-        # Prevent reuse of a UTR already attached to another non-closed order.
-        duplicate = await asyncio.to_thread(
-            lambda: db.reference("orders").order_by_child("utr").equal_to(normalized_utr).get() or {}
-        )
+        # Prevent reuse of a UTR already attached to another order.
+        # Do this defensively: a database query/index problem must NEVER make a
+        # valid UTR submission fail with the generic "couldn't process" message.
+        try:
+            duplicate = await asyncio.to_thread(
+                lambda: db.reference("orders").order_by_child("utr").equal_to(normalized_utr).get() or {}
+            )
+        except Exception:
+            logger.exception("Duplicate-UTR lookup failed for %s; continuing with submission", oid)
+            duplicate = {}
+
         if duplicate:
             for other_id, other in duplicate.items():
                 if other_id != oid and other.get("status") not in {
@@ -639,17 +646,24 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     return
 
         timestamp = now_ms()
-        await asyncio.to_thread(
-            fb_update,
-            f"orders/{oid}",
-            {
-                "utr": normalized_utr,
-                "status": "awaiting_verification",
-                "payment_status": "submitted",
-                "utr_submitted_at": timestamp,
-                "updated_at": timestamp,
-            },
-        )
+        try:
+            await asyncio.to_thread(
+                fb_update,
+                f"orders/{oid}",
+                {
+                    "utr": normalized_utr,
+                    "status": "awaiting_verification",
+                    "payment_status": "submitted",
+                    "utr_submitted_at": timestamp,
+                    "updated_at": timestamp,
+                },
+            )
+        except Exception:
+            logger.exception("Failed to save UTR for order %s", oid)
+            await update.message.reply_text(
+                "⚠️ I couldn't save the UTR right now. Please try again in a moment."
+            )
+            return
         context.user_data.pop("awaiting_utr_order", None)
         await asyncio.to_thread(
             fb_update, f"users/{user.id}", {"pending_utr_order": None, "last_seen_at": timestamp}

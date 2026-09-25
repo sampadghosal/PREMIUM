@@ -1,4 +1,4 @@
-python-telegram-bot[ext]==22.8
+python-telegram-bot==22.8
 firebase-admin>=6.5,<7
-cryptography>=43,<45
-qrcode[pil]>=8,<9
+qrcode[pil]>=7.4,<9
+cryptography>=42,<47
