@@ -1322,65 +1322,6 @@ async def show_support(query) -> None:
 # Admin commands
 # -----------------------------------------------------------------------------
 
-async def resend_key(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    if not user:
-        return
-
-    purchases = await asyncio.to_thread(
-        lambda: db.reference("purchases").order_by_child("telegram_id").equal_to(user.id).get() or {}
-    )
-    active = [
-        (pid, p) for pid, p in purchases.items()
-        if p.get("status") == "active" and int(p.get("expires_at", 0)) > now_ms()
-    ]
-    if not active:
-        await update.message.reply_text(UI.text("my_orders", field="text_empty"), parse_mode=ParseMode.HTML)
-        return
-
-    pid, purchase = sorted(active, key=lambda item: int(item[1].get("expires_at", 0)), reverse=True)[0]
-    encrypted = purchase.get("encrypted_key")
-    if not encrypted:
-        await update.message.reply_text(UI.text("key_recovery_error"), parse_mode=ParseMode.HTML)
-        return
-
-    try:
-        raw_key = decrypt_key(encrypted)
-    except InvalidToken:
-        logger.error("Could not decrypt key for purchase %s", pid)
-        await update.message.reply_text(UI.text("key_recovery_error"), parse_mode=ParseMode.HTML)
-        return
-
-    product = await asyncio.to_thread(get_product, purchase.get("product_id", "website"))
-    destination = product_url(product or {})
-    buttons = []
-    delivery_ui = UI.get_state("key_delivery")
-    if destination and "YOUR-WEBSITE-URL" not in destination:
-        buttons.append([
-            InlineKeyboardButton(
-                delivery_ui.get("product_button", "🌐 Open Product"),
-                url=destination,
-            )
-        ])
-    buttons.append([
-        InlineKeyboardButton(
-            delivery_ui.get("orders_button", "📦 My Orders"),
-            callback_data="my_orders",
-            style="primary",
-        )
-    ])
-
-    await update.message.reply_text(
-        UI.text("key_delivery", {
-            "key": raw_key,
-            "expires_at": datetime.fromtimestamp(
-                int(purchase["expires_at"]) / 1000, timezone.utc
-            ).strftime("%d %b %Y %H:%M UTC"),
-        }),
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(buttons),
-    )
-
 
 async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not is_admin(update.effective_user.id):
@@ -1525,8 +1466,7 @@ async def set_bot_commands(application: Application) -> None:
         BotCommand("orders", "View your orders"),
         BotCommand("status", "View active premium access"),
         BotCommand("support", "Contact support"),
-        BotCommand("resendkey", "Recover an active premium key"),
-    ]
+        ]
     await application.bot.set_my_commands(public_commands)
 
     # Admin-only command menu. The command itself is still protected by the
@@ -1546,7 +1486,6 @@ def build_application() -> Application:
     application.add_handler(CommandHandler("status", status_command))
     application.add_handler(CommandHandler("support", support_command))
     application.add_handler(CommandHandler("admin", admin_command))
-    application.add_handler(CommandHandler("resendkey", resend_key))
     application.add_handler(CallbackQueryHandler(callbacks))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     application.add_error_handler(error_handler)

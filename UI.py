@@ -6,7 +6,6 @@ UI is stored in Firebase Realtime Database under /ui.
 This module is presentation-only:
 - HTML text comes from Firebase.
 - Inline keyboards come from Firebase.
-- Persistent reply keyboards come from Firebase.
 - {{variables}} are substituted at runtime.
 - Firebase can select only trusted action strings; it never executes Python.
 
@@ -43,7 +42,7 @@ DEFAULT_UI: dict[str, dict[str, Any]] = {
     },
     "help": {
         "enabled": True,
-        "html": "<b>❓ SILENT PREMIUM — HELP</b>\n\nUse the commands below or the buttons in the message.\n\n<b>Available commands</b>\n/start — Open the main menu\n/help — Show this help\n/plans — View premium plans\n/orders — View your orders\n/status — View your active premium access\n/support — Contact support\n/resendkey — Recover an active premium key\n\n<i>Admin commands are restricted to the configured admin account.</i>",
+        "html": "<b>❓ SILENT PREMIUM — HELP</b>\n\nUse the commands below or the buttons in the message.\n\n<b>Available commands</b>\n/start — Open the main menu\n/help — Show this help\n/plans — View premium plans\n/orders — View your orders\n/status — View your active premium access\n/support — Contact support\n\n<i>Admin commands are restricted to the configured admin account.</i>",
         "inline_keyboard": {
             "enabled": True,
             "rows": [
