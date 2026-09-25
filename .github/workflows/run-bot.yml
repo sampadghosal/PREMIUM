@@ -31,6 +31,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Syntax Check
+        run: python -m py_compile bot.py
+
       - name: Run Bot
         env:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
@@ -40,5 +43,4 @@ jobs:
           FIREBASE_PRIVATE_KEY: ${{ secrets.FIREBASE_PRIVATE_KEY }}
           FIREBASE_DATABASE_URL: ${{ secrets.FIREBASE_DATABASE_URL }}
           KEY_ENCRYPTION_KEY: ${{ secrets.KEY_ENCRYPTION_KEY }}
-        run: |
-          python bot.py
+        run: python bot.py
