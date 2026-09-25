@@ -13,13 +13,7 @@ import qrcode
 import firebase_admin
 from firebase_admin import credentials, db
 from cryptography.fernet import Fernet, InvalidToken
-from telegram import (
-    BotCommand,
-    BotCommandScopeChat,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    Update,
-)
+from telegram import BotCommand, BotCommandScopeChat, Update
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
@@ -237,99 +231,26 @@ def product_url(product: dict[str, Any]) -> str:
 # -----------------------------------------------------------------------------
 # UI helpers
 # -----------------------------------------------------------------------------
+# IMPORTANT: UI.py is the single customer-facing UI engine.
+# Do not create Telegram keyboards directly in bot.py.
 
-def main_menu() -> InlineKeyboardMarkup:
+def main_menu():
     return UI.keyboard("welcome")
 
+def plans_menu(product: dict[str, Any]):
+    return UI.plans_keyboard(product)
 
-def plans_menu(product: dict[str, Any]) -> InlineKeyboardMarkup:
-    product_id = "website"
-    rows = []
-    plans = product.get("plans", {})
+def payment_method_menu(order: str):
+    return UI.keyboard("payment_methods", {"order_id": order, "product_id": "website"})
 
-    for plan_id, plan in plans.items():
-        if not plan.get("enabled", True):
-            continue
-        values = {
-            "plan_id": plan_id,
-            "plan_name": plan.get("name", plan_id),
-            "price": plan.get("price", 0),
-            "product_id": product_id,
-        }
-        rows.append([
-            UI.button(
-                "plans",
-                "plan_button",
-                values,
-                f"plan:{product_id}:{plan_id}",
-                "success",
-            )
-        ])
-
-    rows.append([
-        InlineKeyboardButton(
-            ui_render(
-                UI.get_state("plans").get("back_button", "◀️ Back"),
-                {},
-            ),
-            callback_data="home",
-            style="primary",
-        )
-    ])
-    return UI.keyboard("plans", {"product_name": product.get("name", "Premium")}, extra_rows=rows)
-
-
-def payment_method_menu(order: str) -> InlineKeyboardMarkup:
-    return UI.keyboard(
-        "payment_methods",
-        {
-            "order_id": order,
-            "product_id": "website",
-        },
-    )
-
-
-def payment_action_menu(order: str) -> InlineKeyboardMarkup:
+def payment_action_menu(order: str):
     return UI.keyboard("payment_pending", {"order_id": order})
 
-
-def order_back_menu() -> InlineKeyboardMarkup:
+def order_back_menu():
     return UI.keyboard("order_cancelled")
 
-
-def admin_review_menu(order: str) -> InlineKeyboardMarkup:
-    state = UI.get_state("admin_review")
-    values = {"order_id": order}
-    rows = []
-    for row in state.get("buttons", []):
-        built = []
-        for b in row:
-            action = str(b.get("action", ""))
-            if action == "approve":
-                callback = f"adminapprove:{order}"
-            elif action == "reject":
-                callback = f"adminreject:{order}"
-            elif action == "detail":
-                callback = f"admindetail:{order}"
-            else:
-                callback = ui_render(action, values)
-            if not callback:
-                continue
-            built.append(InlineKeyboardButton(
-                ui_render(b.get("text", "Button"), values),
-                callback_data=callback,
-            ))
-        if built:
-            rows.append(built)
-    if not rows:
-        rows = [
-            [
-                InlineKeyboardButton("✅ Approve", callback_data=f"adminapprove:{order}"),
-                InlineKeyboardButton("❌ Reject", callback_data=f"adminreject:{order}"),
-            ],
-            [InlineKeyboardButton("🔎 Order Details", callback_data=f"admindetail:{order}")],
-        ]
-    return InlineKeyboardMarkup(rows)
+def admin_review_menu(order: str):
+    return UI.admin_review_keyboard(order)
 
 
 def html_escape(value: Any) -> str:
@@ -1037,22 +958,6 @@ async def approve_order(query, context: ContextTypes.DEFAULT_TYPE, oid: str) -> 
     # Send raw key only to the customer; Firebase stores only its hash.
     try:
         destination = product_url(product)
-        buttons = []
-        approved_ui = UI.get_state("payment_approved_customer")
-        if destination and "YOUR-WEBSITE-URL" not in destination:
-            buttons.append([
-                InlineKeyboardButton(
-                    approved_ui.get("product_button", "🌐 Open Product"),
-                    url=destination,
-                )
-            ])
-        buttons.append([
-            InlineKeyboardButton(
-                approved_ui.get("orders_button", "📦 My Orders"),
-                callback_data="my_orders",
-                style="primary",
-            )
-        ])
 
         await context.bot.send_message(
             chat_id=int(order["telegram_id"]),
@@ -1065,7 +970,7 @@ async def approve_order(query, context: ContextTypes.DEFAULT_TYPE, oid: str) -> 
                 ).strftime("%d %b %Y %H:%M UTC"),
             }),
             parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup(buttons),
+            reply_markup=UI.payment_approved_keyboard(destination),
         )
     except Exception:
         logger.exception("Failed to deliver key for %s", oid)
@@ -1158,47 +1063,24 @@ async def show_orders(query) -> None:
 
         active_purchases.sort(key=lambda p: int(p.get("expires_at", 0)), reverse=True)
 
-        rows = []
+        # UI.py owns the keyboard. bot.py only prepares data.
         for purchase in active_purchases:
             plan = await asyncio.to_thread(
                 get_plan,
                 purchase.get("product_id", "website"),
                 purchase.get("plan_id", ""),
             )
-            plan_name = (plan or {}).get("name", purchase.get("plan_id", "Premium"))
-            rows.append([
-                UI.button(
-                    "my_orders",
-                    "active_button",
-                    {
-                        "plan_name": plan_name,
-                        "amount": purchase.get("amount", 0),
-                        "purchase_id": purchase["purchase_id"],
-                    },
-                    f"purchase:view:{purchase['purchase_id']}",
-                    "success",
-                )
-            ])
+            purchase["plan_name"] = (plan or {}).get("name", purchase.get("plan_id", "Premium"))
 
         if active_purchases:
             message = UI.text("my_orders", field="text_active")
         else:
             message = UI.text("my_orders", field="text_empty")
 
-        rows.append([
-            UI.button(
-                "my_orders",
-                "back_button",
-                {},
-                "home",
-                "primary",
-            )
-        ])
-
         await query.edit_message_text(
             message,
             parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup(rows),
+            reply_markup=UI.orders_keyboard(active_purchases),
         )
 
     except Exception:
@@ -1249,30 +1131,12 @@ async def show_purchase_detail(query, purchase_id_value: str) -> None:
             "expires_at": expires_text,
         }
 
-        rows = []
         destination = product_url(product or {})
-        if destination and "YOUR-WEBSITE-URL" not in destination:
-            rows.append([
-                InlineKeyboardButton(
-                    UI.get_state("active_order").get("product_button", "🌐 Open Product"),
-                    url=destination,
-                )
-            ])
-
-        rows.append([
-            UI.button(
-                "active_order",
-                "back_button",
-                {},
-                "my_orders",
-                "primary",
-            )
-        ])
 
         await query.edit_message_text(
             UI.text("active_order", values),
             parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup(rows),
+            reply_markup=UI.active_order_keyboard(destination),
         )
 
     except (InvalidToken, TypeError, ValueError):
@@ -1296,25 +1160,10 @@ async def show_support(query) -> None:
     settings = await asyncio.to_thread(get_settings)
     username = settings.get("support", {}).get("telegram_username", "").strip().lstrip("@")
 
-    state = UI.get_state("support")
-    rows = []
-
-    if username:
-        rows.append([
-            InlineKeyboardButton(
-                state.get("contact_button", "📞 Contact Support"),
-                url=f"https://t.me/{username}",
-            )
-        ])
-
-    rows.append([
-        UI.button("support", "back_button", {}, "home", "primary")
-    ])
-
     await query.edit_message_text(
         UI.text("support"),
         parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(rows),
+        reply_markup=UI.support_keyboard(username),
     )
 
 

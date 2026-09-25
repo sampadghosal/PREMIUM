@@ -1,18 +1,16 @@
 """
 SILENT PREMIUM — Firebase UI Engine
 
-UI is stored in Firebase Realtime Database under /ui.
+Single source of truth for all customer-facing Telegram UI.
 
-This module is presentation-only:
-- HTML text comes from Firebase.
-- Inline keyboards come from Firebase.
-- {{variables}} are substituted at runtime.
-- Firebase can select only trusted action strings; it never executes Python.
-
-For compatibility, both `inline_keyboard.rows` and the older `buttons` format
-are accepted for inline keyboards.
+Rules:
+- bot.py contains business logic/actions only.
+- UI.py builds every customer-facing inline keyboard.
+- Firebase /ui controls copy, labels, button styles and static layouts.
+- Dynamic plan/order buttons are generated here from Firebase data, so bot.py
+  never creates a second keyboard for the same screen.
+- Customer messages use inline keyboards only.
 """
-
 from __future__ import annotations
 
 import re
@@ -28,11 +26,19 @@ _TOKEN = re.compile(r"{{\s*([a-zA-Z0-9_.-]+)\s*}}")
 DEFAULT_UI: dict[str, dict[str, Any]] = {
     "welcome": {
         "enabled": True,
-        "html": "<b>👑 SILENT PREMIUM</b>\n\nPremium access made simple.\n\nChoose a service below:",
+        "html": (
+            "<b>👑 SILENT PREMIUM STORE</b>\n\n"
+            "<blockquote>Welcome to the official premium store!\n"
+            "Upgrade your membership to get instant access to premium website content and exclusive features.</blockquote>\n\n"
+            "💎 <b>Available Premium Services:</b>\n\n"
+            "👑 FabHouse Premium — Premium Website Access\n\n"
+            "<i>Select a service below or use /plans to view complete pricing.</i>\n\n"
+            "⚡ Powered by @SILENT_MOD_SG"
+        ),
         "inline_keyboard": {
             "enabled": True,
             "rows": [
-                [{"text": "🌐 Website Premium", "action": "product:website", "style": "success"}],
+                [{"text": "👑 FabHouse Premium", "action": "product:website", "style": "success"}],
                 [
                     {"text": "📦 My Orders", "action": "orders", "style": "primary"},
                     {"text": "📞 Support / Help", "action": "support", "style": "primary"},
@@ -42,51 +48,98 @@ DEFAULT_UI: dict[str, dict[str, Any]] = {
     },
     "help": {
         "enabled": True,
-        "html": "<b>❓ SILENT PREMIUM — HELP</b>\n\nUse the commands below or the buttons in the message.\n\n<b>Available commands</b>\n/start — Open the main menu\n/help — Show this help\n/plans — View premium plans\n/orders — View your orders\n/status — View your active premium access\n/support — Contact support\n\n<i>Admin commands are restricted to the configured admin account.</i>",
+        "html": (
+            "<b>❓ SILENT PREMIUM — HELP</b>\n\n"
+            "Use the commands below or the buttons in the message.\n\n"
+            "<b>Available commands</b>\n"
+            "/start — Open the main menu\n"
+            "/help — Show this help\n"
+            "/plans — View premium plans\n"
+            "/orders — View your orders\n"
+            "/status — View active premium access\n"
+            "/support — Contact support\n\n"
+            "<i>/admin is available only to the configured admin account.</i>"
+        ),
         "inline_keyboard": {
             "enabled": True,
             "rows": [
+                [{"text": "👑 FabHouse Premium", "action": "product:website", "style": "success"}],
                 [
-                    {"text": "💎 View Plans", "action": "product:website", "style": "success"},
-                    {"text": "📦 My Orders", "action": "orders", "style": "primary"}
-                ],
-                [
+                    {"text": "📦 My Orders", "action": "orders", "style": "primary"},
                     {"text": "📞 Support", "action": "support", "style": "primary"},
-                    {"text": "🏠 Main Menu", "action": "home", "style": "primary"}
-                ]
-            ]
-        }
+                ],
+                [{"text": "🏠 Main Menu", "action": "home", "style": "primary"}],
+            ],
+        },
     },
     "product": {
         "enabled": True,
-        "html": "<b>👑 {{product_name}}</b>\n\n{{description}}\n\n<b>Choose your plan:</b>",
+        "html": (
+            "<b>👑 {{product_name}}</b>\n\n"
+            "{{description}}\n\n"
+            "<b>Choose your plan:</b>"
+        ),
         "inline_keyboard": {"enabled": True, "rows": []},
     },
     "plans": {
         "enabled": True,
-        "html": "<b>📦 {{product_name}}</b>\n\n<b>Choose your plan:</b>",
-        "plan_button": "🟢 {{plan_name}} — ₹{{price}}",
+        "html": (
+            "<b>🔥 FABHOUSE PREMIUM</b>\n\n"
+            "<blockquote>✨ <b>Special Premium Offer!</b> ✨\n"
+            "Get premium website access with instant activation and full access to the available premium features.</blockquote>\n\n"
+            "💎 <b>What You Get:</b>\n\n"
+            "<blockquote>• Premium Website Access\n"
+            "• Individual Premium License Key\n"
+            "• Clean &amp; Ad-Free Experience</blockquote>\n\n"
+            "<i>Select your preferred duration below:</i>\n\n"
+            "⚡ Powered by @SILENT_MOD_SG"
+        ),
+        "plan_button": "👑 {{plan_name}} (₹{{price}})",
+        "plan_style": "success",
+        "back_button": "◀️ Back to Main Menu",
+        "back_action": "home",
         "inline_keyboard": {"enabled": True, "rows": []},
-        "back_button": "◀️ Back",
     },
     "payment_methods": {
         "enabled": True,
-        "html": "<b>💳 CHOOSE YOUR PAYMENT METHOD</b>\n\nOrder: <code>{{order_id}}</code>\nPlan: <b>{{plan_name}}</b>\nAmount: <b>₹{{amount}}</b>\n\nSelect your preferred payment method:",
+        "html": (
+            "<b>💳 CHECKOUT: {{plan_name}}</b>\n\n"
+            "<blockquote>💎 Plan: {{plan_name}}\n"
+            "💰 Price: ₹{{amount}}\n"
+            "⚡ Delivery: Instant Activation</blockquote>\n\n"
+            "<b>💳 Choose Your Payment Method:</b>"
+        ),
         "inline_keyboard": {
             "enabled": True,
             "rows": [
-                [{"text": "🧾 Manual UPI", "action": "manual:{{order_id}}", "style": "success"}],
+                [{"text": "🧾 Manual UPI (UTR Proof)", "action": "manual:{{order_id}}", "style": "success"}],
                 [{"text": "◀️ Back to Plans", "action": "planback:{{order_id}}", "style": "primary"}],
             ],
         },
     },
     "manual_upi": {
         "enabled": True,
-        "caption": "<b>🧾 MANUAL UPI PAYMENT</b>\n\nOrder: <code>{{order_id}}</code>\nAmount: <b>₹{{amount}}</b>\nUPI ID: <code>{{upi_id}}</code>\nName: {{upi_name}}\n\n<b>Instructions</b>\n1. Pay the exact amount.\n2. Use <code>{{order_id}}</code> as the payment note if supported.\n3. Submit your UTR after payment.\n\n⏳ Payment window: {{payment_window_minutes}} minutes",
+        "caption": (
+            "<b>🧾 MANUAL UPI PAYMENT</b>\n\n"
+            "Order: <code>{{order_id}}</code>\n"
+            "Amount: <b>₹{{amount}}</b>\n"
+            "UPI ID: <code>{{upi_id}}</code>\n"
+            "Name: {{upi_name}}\n\n"
+            "<b>Instructions</b>\n"
+            "1. Pay the exact amount.\n"
+            "2. Use <code>{{order_id}}</code> as the payment note if supported.\n"
+            "3. Submit your UTR after payment.\n\n"
+            "⏳ Payment window: {{payment_window_minutes}} minutes"
+        ),
     },
     "payment_pending": {
         "enabled": True,
-        "html": "<b>⏳ PAYMENT PENDING</b>\n\nOrder: <code>{{order_id}}</code>\nAmount: <b>₹{{amount}}</b>\n\nComplete the payment and submit your UTR.",
+        "html": (
+            "<b>⏳ PAYMENT PENDING</b>\n\n"
+            "Order: <code>{{order_id}}</code>\n"
+            "Amount: <b>₹{{amount}}</b>\n\n"
+            "Complete the payment and submit your UTR."
+        ),
         "inline_keyboard": {
             "enabled": True,
             "rows": [
@@ -119,14 +172,16 @@ DEFAULT_UI: dict[str, dict[str, Any]] = {
         "text_empty": "<b>📦 MY ORDERS</b>\n\nYou currently have no active premium orders.",
         "text_error": "<b>⚠️ MY ORDERS</b>\n\nI couldn't load your active orders right now.\n\nPlease try again.",
         "active_button": "🟢 {{plan_name}} · ₹{{amount}}",
+        "active_style": "success",
         "back_button": "◀️ Back to Main Menu",
         "inline_keyboard": {"enabled": True, "rows": []},
     },
     "active_order": {
         "enabled": True,
-        "html": "<b>🔑 ACTIVE PREMIUM ORDER</b>\n\nPurchase: <code>{{purchase_id}}</code>\nOrder: <code>{{order_id}}</code>\nPlan: <b>{{plan_name}}</b>\nPaid: <b>₹{{amount}}</b>\n\n<b>🔑 Your Premium Key</b>\n\n<code>{{key}}</code>\n\n⏰ Expires: <code>{{expires_at}}</code>\n\n<i>You can open this order again anytime from My Orders while it remains active.</i>",
+        "html": "<b>🔑 ACTIVE PREMIUM ORDER</b>\n\nPurchase: <code>{{purchase_id}}</code>\nOrder: <code>{{order_id}}</code>\nPlan: <b>{{plan_name}}</b>\nPaid: <b>₹{{amount}}</b>\n\n<b>🔑 Your Premium Key</b>\n\n<code>{{key}}</code>\n\n⏰ Expires: <code>{{expires_at}}</code>",
         "product_button": "🌐 Open Product",
         "back_button": "📦 Back to My Orders",
+        "back_style": "primary",
         "inline_keyboard": {"enabled": True, "rows": []},
     },
     "support": {
@@ -134,6 +189,7 @@ DEFAULT_UI: dict[str, dict[str, Any]] = {
         "html": "<b>📞 SUPPORT / HELP</b>\n\nFor payment or premium-access issues, contact support.",
         "contact_button": "📞 Contact Support",
         "back_button": "◀️ Back to Main Menu",
+        "back_style": "primary",
         "inline_keyboard": {"enabled": True, "rows": []},
     },
     "payment_approved_customer": {
@@ -141,14 +197,42 @@ DEFAULT_UI: dict[str, dict[str, Any]] = {
         "html": "<b>🎉 PAYMENT APPROVED</b>\n\nYour premium access is now active.\n\n📦 Plan: <b>{{plan_name}}</b>\n💰 Paid: ₹{{amount}}\n\n🔑 <b>Your Premium Key</b>\n\n<code>{{key}}</code>\n\n⏰ Expires: <code>{{expires_at}}</code>",
         "product_button": "🌐 Open Product",
         "orders_button": "📦 My Orders",
+        "orders_action": "my_orders",
+        "orders_style": "primary",
     },
-    "payment_approved_admin": {"enabled": True, "html": "<b>✅ PAYMENT APPROVED</b>\n\nOrder: <code>{{order_id}}</code>\nPurchase: <code>{{purchase_id}}</code>\nKey issued to the customer.\n\nStatus: Active"},
-    "payment_rejected_customer": {"enabled": True, "html": "<b>❌ PAYMENT NOT APPROVED</b>\n\nOrder: <code>{{order_id}}</code>\n\nYour payment could not be verified.\nPlease contact support if you believe this was a mistake."},
-    "payment_rejected_admin": {"enabled": True, "html": "<b>❌ PAYMENT REJECTED</b>\n\nOrder: <code>{{order_id}}</code> has been rejected."},
-    "key_recovery_error": {"enabled": True, "html": "<b>⚠️ KEY RECOVERY ERROR</b>\n\nYour premium purchase exists, but the key could not be recovered.\n\nPlease contact support."},
-    "order_error": {"enabled": True, "html": "<b>⚠️ ORDER ERROR</b>\n\nI couldn't open this premium order right now.\n\nPlease try again."},
-    "key_delivery": {"enabled": True, "html": "<b>🔑 YOUR PREMIUM KEY</b>\n\n<code>{{key}}</code>\n\n⏰ Expires: <code>{{expires_at}}</code>", "product_button": "🌐 Open Product", "orders_button": "📦 My Orders"},
-    "admin_review": {"enabled": True, "inline_keyboard": {"enabled": True, "rows": [[{"text": "✅ Approve", "action": "approve"}, {"text": "❌ Reject", "action": "reject"}], [{"text": "🔎 Order Details", "action": "detail"}]]}},
+    "payment_approved_admin": {
+        "enabled": True,
+        "html": "<b>✅ PAYMENT APPROVED</b>\n\nOrder: <code>{{order_id}}</code>\nPurchase: <code>{{purchase_id}}</code>\nKey issued to the customer.\n\nStatus: Active"
+    },
+    "payment_rejected_customer": {
+        "enabled": True,
+        "html": "<b>❌ PAYMENT NOT APPROVED</b>\n\nOrder: <code>{{order_id}}</code>\n\nYour payment could not be verified.\nPlease contact support if you believe this was a mistake."
+    },
+    "payment_rejected_admin": {
+        "enabled": True,
+        "html": "<b>❌ PAYMENT REJECTED</b>\n\nOrder: <code>{{order_id}}</code> has been rejected."
+    },
+    "key_recovery_error": {
+        "enabled": True,
+        "html": "<b>⚠️ KEY RECOVERY ERROR</b>\n\nYour premium purchase exists, but the key could not be recovered.\n\nPlease contact support."
+    },
+    "order_error": {
+        "enabled": True,
+        "html": "<b>⚠️ ORDER ERROR</b>\n\nI couldn't open this premium order right now.\n\nPlease try again."
+    },
+    "admin_review": {
+        "enabled": True,
+        "inline_keyboard": {
+            "enabled": True,
+            "rows": [
+                [
+                    {"text": "✅ Approve", "action": "approve"},
+                    {"text": "❌ Reject", "action": "reject"}
+                ],
+                [{"text": "🔎 Order Details", "action": "detail"}]
+            ]
+        }
+    },
     "alerts": {
         "payment_instructions_sent": "Payment instructions sent.",
         "plan_unavailable": "<b>⚠️ PLAN UNAVAILABLE</b>\n\nPlease choose another plan.",
@@ -219,7 +303,6 @@ def render(template: Any, values: Optional[dict[str, Any]] = None) -> Any:
 
 def text(state: str, values: Optional[dict[str, Any]] = None, field: str = "html") -> str:
     data = get_state(state)
-    # New schema uses `html`; older V8 schema used `text`.
     template = data.get(field)
     if template is None and field == "html":
         template = data.get("text", "")
@@ -249,7 +332,6 @@ def _inline_rows(data: dict[str, Any]) -> list[list[dict[str, Any]]]:
         rows = inline.get("rows", [])
         if isinstance(rows, list):
             return rows
-    # Backward compatibility with V8's `buttons`.
     rows = data.get("buttons", [])
     return rows if isinstance(rows, list) else []
 
@@ -265,12 +347,12 @@ def keyboard(state: str, values: Optional[dict[str, Any]] = None, extra_rows: Op
         for row in _inline_rows(data):
             if not isinstance(row, list):
                 continue
-            built: list[InlineKeyboardButton] = []
+            built = []
             for item in row:
                 if isinstance(item, dict):
-                    button = _button(item, values)
-                    if button:
-                        built.append(button)
+                    btn = _button(item, values)
+                    if btn:
+                        built.append(btn)
             if built:
                 rows.append(built)
 
@@ -283,9 +365,121 @@ def button(state: str, field: str, values: dict[str, Any], callback_data: str, s
     data = get_state(state)
     label = str(render(data.get(field, "Button"), values))
     kwargs: dict[str, Any] = {"text": label, "callback_data": callback_data}
-    if style in {"primary", "success", "danger"}:
-        kwargs["style"] = style
+    chosen_style = style or data.get(f"{field}_style") or data.get("style")
+    if chosen_style in {"primary", "success", "danger"}:
+        kwargs["style"] = chosen_style
     return InlineKeyboardButton(**kwargs)
+
+
+def plans_keyboard(product: dict[str, Any]) -> InlineKeyboardMarkup:
+    """Build exactly ONE plan keyboard from Firebase UI + product plans."""
+    state = get_state("plans")
+    plan_template = state.get("plan_button", "👑 {{plan_name}} (₹{{price}})")
+    plan_style = state.get("plan_style", "success")
+    rows: list[list[InlineKeyboardButton]] = []
+
+    plans = product.get("plans", {}) or {}
+    for plan_id, plan in plans.items():
+        if not isinstance(plan, dict) or not plan.get("enabled", True):
+            continue
+        values = {
+            "plan_id": plan_id,
+            "plan_name": plan.get("name", plan_id),
+            "price": plan.get("price", 0),
+            "product_id": "website",
+        }
+        kwargs = {
+            "text": str(render(plan_template, values)),
+            "callback_data": f"plan:website:{plan_id}",
+        }
+        if plan_style in {"primary", "success", "danger"}:
+            kwargs["style"] = plan_style
+        rows.append([InlineKeyboardButton(**kwargs)])
+
+    back_text = str(render(state.get("back_button", "◀️ Back to Main Menu"), {}))
+    back_action = str(render(state.get("back_action", "home"), {}))
+    rows.append([InlineKeyboardButton(text=back_text, callback_data=back_action, style="primary")])
+    return InlineKeyboardMarkup(rows)
+
+
+def orders_keyboard(active_purchases: list[dict[str, Any]]) -> InlineKeyboardMarkup:
+    state = get_state("my_orders")
+    rows: list[list[InlineKeyboardButton]] = []
+    for purchase in active_purchases:
+        rows.append([
+            button(
+                "my_orders",
+                "active_button",
+                {
+                    "plan_name": purchase.get("plan_name", "Premium"),
+                    "amount": purchase.get("amount", 0),
+                    "purchase_id": purchase.get("purchase_id", ""),
+                },
+                f"purchase:view:{purchase.get('purchase_id', '')}",
+                state.get("active_style", "success"),
+            )
+        ])
+    rows.append([button("my_orders", "back_button", {}, "home", "primary")])
+    return InlineKeyboardMarkup(rows)
+
+
+def active_order_keyboard(destination: str) -> InlineKeyboardMarkup:
+    state = get_state("active_order")
+    rows: list[list[InlineKeyboardButton]] = []
+    if destination and "YOUR-WEBSITE-URL" not in destination:
+        rows.append([InlineKeyboardButton(state.get("product_button", "🌐 Open Product"), url=destination)])
+    rows.append([button("active_order", "back_button", {}, "my_orders", state.get("back_style", "primary"))])
+    return InlineKeyboardMarkup(rows)
+
+
+def support_keyboard(username: str) -> InlineKeyboardMarkup:
+    state = get_state("support")
+    rows: list[list[InlineKeyboardButton]] = []
+    if username:
+        rows.append([InlineKeyboardButton(state.get("contact_button", "📞 Contact Support"), url=f"https://t.me/{username}")])
+    rows.append([button("support", "back_button", {}, "home", state.get("back_style", "primary"))])
+    return InlineKeyboardMarkup(rows)
+
+
+def payment_approved_keyboard(destination: str) -> InlineKeyboardMarkup:
+    state = get_state("payment_approved_customer")
+    rows: list[list[InlineKeyboardButton]] = []
+    if destination and "YOUR-WEBSITE-URL" not in destination:
+        rows.append([InlineKeyboardButton(state.get("product_button", "🌐 Open Product"), url=destination)])
+    rows.append([InlineKeyboardButton(
+        state.get("orders_button", "📦 My Orders"),
+        callback_data=str(state.get("orders_action", "my_orders")),
+        style=state.get("orders_style", "primary"),
+    )])
+    return InlineKeyboardMarkup(rows)
+
+
+def admin_review_keyboard(order_id: str) -> InlineKeyboardMarkup:
+    state = get_state("admin_review")
+    values = {"order_id": order_id}
+    rows: list[list[InlineKeyboardButton]] = []
+    for row in _inline_rows(state):
+        built: list[InlineKeyboardButton] = []
+        for item in row:
+            if not isinstance(item, dict):
+                continue
+            action = str(render(item.get("action", ""), values))
+            if action == "approve":
+                action = f"adminapprove:{order_id}"
+            elif action == "reject":
+                action = f"adminreject:{order_id}"
+            elif action == "detail":
+                action = f"admindetail:{order_id}"
+            if not action:
+                continue
+            cfg = dict(item)
+            cfg["action"] = action
+            btn = _button(cfg, values)
+            if btn:
+                built.append(btn)
+        if built:
+            rows.append(built)
+    return InlineKeyboardMarkup(rows)
 
 
 def ui_config() -> dict[str, Any]:
@@ -301,4 +495,10 @@ class UI:
     text = staticmethod(text)
     keyboard = staticmethod(keyboard)
     button = staticmethod(button)
+    plans_keyboard = staticmethod(plans_keyboard)
+    orders_keyboard = staticmethod(orders_keyboard)
+    active_order_keyboard = staticmethod(active_order_keyboard)
+    support_keyboard = staticmethod(support_keyboard)
+    payment_approved_keyboard = staticmethod(payment_approved_keyboard)
+    admin_review_keyboard = staticmethod(admin_review_keyboard)
     parse_mode = ParseMode.HTML
