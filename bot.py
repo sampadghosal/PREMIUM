@@ -74,6 +74,8 @@ except Exception as exc:
     raise RuntimeError("KEY_ENCRYPTION_KEY must be a valid Fernet key") from exc
 
 
+from UI import UI, state_text, keyboard as ui_keyboard, dynamic_button as ui_button, render as ui_render
+
 # -----------------------------------------------------------------------------
 # Firebase
 # -----------------------------------------------------------------------------
@@ -231,58 +233,97 @@ def product_url(product: dict[str, Any]) -> str:
 # -----------------------------------------------------------------------------
 
 def main_menu() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🌐 Website Premium", callback_data="product:website", style="success")],
-        [
-            InlineKeyboardButton("📦 My Orders", callback_data="my_orders", style="primary"),
-            InlineKeyboardButton("📞 Support / Help", callback_data="support", style="primary"),
-        ],
-    ])
+    return UI.keyboard("welcome")
 
 
 def plans_menu(product: dict[str, Any]) -> InlineKeyboardMarkup:
+    product_id = "website"
     rows = []
     plans = product.get("plans", {})
+
     for plan_id, plan in plans.items():
         if not plan.get("enabled", True):
             continue
+        values = {
+            "plan_id": plan_id,
+            "plan_name": plan.get("name", plan_id),
+            "price": plan.get("price", 0),
+            "product_id": product_id,
+        }
         rows.append([
-            InlineKeyboardButton(
-                f"🟢 {plan.get('name', plan_id)} — ₹{plan.get('price', 0)}",
-                callback_data=f"plan:website:{plan_id}",
-                style="success",
+            UI.button(
+                "plans",
+                "plan_button",
+                values,
+                f"plan:{product_id}:{plan_id}",
+                "success",
             )
         ])
-    rows.append([InlineKeyboardButton("◀️ Back", callback_data="home", style="primary")])
-    return InlineKeyboardMarkup(rows)
+
+    rows.append([
+        InlineKeyboardButton(
+            ui_render(
+                UI.get_state("plans").get("back_button", "◀️ Back"),
+                {},
+            ),
+            callback_data="home",
+            style="primary",
+        )
+    ])
+    return UI.keyboard("plans", {"product_name": product.get("name", "Premium")}, extra_rows=rows)
 
 
 def payment_method_menu(order: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🧾 Manual UPI", callback_data=f"manual:{order}", style="success")],
-        [InlineKeyboardButton("◀️ Back", callback_data=f"planback:{order}", style="primary")],
-    ])
+    return UI.keyboard(
+        "payment_methods",
+        {
+            "order_id": order,
+            "product_id": "website",
+        },
+    )
 
 
 def payment_action_menu(order: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🧾 Submit UTR", callback_data=f"utr:{order}", style="success")],
-        [InlineKeyboardButton("🔴 Cancel Order", callback_data=f"cancel:{order}", style="danger")],
-    ])
+    return UI.keyboard("payment_pending", {"order_id": order})
 
 
 def order_back_menu() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Back to Main Menu", callback_data="home", style="primary")]])
+    return UI.keyboard("order_cancelled")
 
 
 def admin_review_menu(order: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("✅ Approve", callback_data=f"adminapprove:{order}"),
-            InlineKeyboardButton("❌ Reject", callback_data=f"adminreject:{order}"),
-        ],
-        [InlineKeyboardButton("🔎 Order Details", callback_data=f"admindetail:{order}")],
-    ])
+    state = UI.get_state("admin_review")
+    values = {"order_id": order}
+    rows = []
+    for row in state.get("buttons", []):
+        built = []
+        for b in row:
+            action = str(b.get("action", ""))
+            if action == "approve":
+                callback = f"adminapprove:{order}"
+            elif action == "reject":
+                callback = f"adminreject:{order}"
+            elif action == "detail":
+                callback = f"admindetail:{order}"
+            else:
+                callback = ui_render(action, values)
+            if not callback:
+                continue
+            built.append(InlineKeyboardButton(
+                ui_render(b.get("text", "Button"), values),
+                callback_data=callback,
+            ))
+        if built:
+            rows.append(built)
+    if not rows:
+        rows = [
+            [
+                InlineKeyboardButton("✅ Approve", callback_data=f"adminapprove:{order}"),
+                InlineKeyboardButton("❌ Reject", callback_data=f"adminreject:{order}"),
+            ],
+            [InlineKeyboardButton("🔎 Order Details", callback_data=f"admindetail:{order}")],
+        ]
+    return InlineKeyboardMarkup(rows)
 
 
 def html_escape(value: Any) -> str:
@@ -300,21 +341,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     await asyncio.to_thread(ensure_user, user)
     await update.message.reply_text(
-        "<b>👑 SILENT PREMIUM</b>\n\n"
-        "Premium access made simple.\n\n"
-        "Choose a service below:",
+        UI.text("welcome"),
         parse_mode=ParseMode.HTML,
-        reply_markup=main_menu(),
+        reply_markup=UI.keyboard("welcome"),
     )
 
 
 async def show_home(query) -> None:
     await query.edit_message_text(
-        "<b>👑 SILENT PREMIUM</b>\n\n"
-        "Premium access made simple.\n\n"
-        "Choose a service below:",
+        UI.text("welcome"),
         parse_mode=ParseMode.HTML,
-        reply_markup=main_menu(),
+        reply_markup=UI.keyboard("welcome"),
     )
 
 
@@ -322,16 +359,20 @@ async def show_product(query, product_id: str) -> None:
     product = await asyncio.to_thread(get_product, product_id)
     if not product or not product.get("enabled", True):
         await query.edit_message_text(
-            "<b>⚠️ PRODUCT UNAVAILABLE</b>\n\nThis product is currently unavailable.",
+            UI.text("order_error", {"product_name": "Premium"}),
             parse_mode=ParseMode.HTML,
-            reply_markup=order_back_menu(),
+            reply_markup=UI.keyboard("order_cancelled"),
         )
         return
 
+    values = {
+        "product_id": product_id,
+        "product_name": product.get("name", "Premium"),
+        "description": product.get("description", "Premium access."),
+    }
+
     await query.edit_message_text(
-        f"<b>👑 {html_escape(product.get('name', 'Premium'))}</b>\n\n"
-        f"{html_escape(product.get('description', 'Premium access.'))}\n\n"
-        "<b>Choose your plan:</b>",
+        UI.text("product", values),
         parse_mode=ParseMode.HTML,
         reply_markup=plans_menu(product),
     )
@@ -343,7 +384,7 @@ async def create_order(query, user, product_id: str, plan_id: str) -> None:
 
     if not product or not product.get("enabled", True) or not plan or not plan.get("enabled", True):
         await query.edit_message_text(
-            "<b>⚠️ PLAN UNAVAILABLE</b>\n\nPlease choose another plan.",
+            UI.text("alerts", field="plan_unavailable"),
             parse_mode=ParseMode.HTML,
             reply_markup=order_back_menu(),
         )
@@ -380,10 +421,12 @@ async def create_order(query, user, product_id: str, plan_id: str) -> None:
     await asyncio.to_thread(fb_set, f"orders/{oid}", order)
 
     await query.edit_message_text(
-        "<b>💳 CHOOSE YOUR PAYMENT METHOD</b>\n\n"
-        f"Order: <code>{oid}</code>\n"
-        f"Plan: {html_escape(plan.get('name', plan_id))}\n"
-        f"Amount: <b>₹{plan.get('price', 0)}</b>",
+        UI.text("payment_methods", {
+            "order_id": oid,
+            "plan_name": plan.get("name", plan_id),
+            "amount": plan.get("price", 0),
+            "product_id": product_id,
+        }),
         parse_mode=ParseMode.HTML,
         reply_markup=payment_method_menu(oid),
     )
@@ -396,11 +439,11 @@ async def create_order(query, user, product_id: str, plan_id: str) -> None:
 async def send_manual_upi(query, context, oid: str) -> None:
     order = await asyncio.to_thread(fb_get, f"orders/{oid}")
     if not order or order.get("telegram_id") != query.from_user.id:
-        await query.answer("Order not found.", show_alert=True)
+        await query.answer(UI.text("generic", field="order_not_found"), show_alert=True)
         return
 
     if order.get("status") in {"cancelled", "completed", "payment_rejected", "expired"}:
-        await query.answer("This order is no longer active.", show_alert=True)
+        await query.answer(UI.text("generic", field="order_closed"), show_alert=True)
         return
 
     if now_ms() > int(order.get("payment_deadline", 0)):
@@ -410,9 +453,9 @@ async def send_manual_upi(query, context, oid: str) -> None:
             {"status": "expired", "payment_status": "expired", "updated_at": now_ms()},
         )
         await query.edit_message_text(
-            "<b>⏰ ORDER EXPIRED</b>\n\nThe payment window has expired. Please create a new order.",
+            UI.text("order_expired", {"order_id": oid}),
             parse_mode=ParseMode.HTML,
-            reply_markup=order_back_menu(),
+            reply_markup=UI.keyboard("order_expired"),
         )
         return
 
@@ -423,28 +466,22 @@ async def send_manual_upi(query, context, oid: str) -> None:
     amount = order.get("amount", 0)
 
     if not upi_id:
-        await query.answer("UPI is not configured yet. Contact admin.", show_alert=True)
+        await query.answer(UI.text("generic", field="upi_missing"), show_alert=True)
         return
 
-    # Standard UPI URI for QR generation. QR is generated in memory and not persisted locally.
     upi_uri = f"upi://pay?pa={upi_id}&pn={upi_name}&am={amount}&cu=INR&tn={oid}"
     qr = qrcode.make(upi_uri)
     buf = io.BytesIO()
     qr.save(buf, format="PNG")
     buf.seek(0)
 
-    caption = (
-        "<b>🧾 MANUAL UPI PAYMENT</b>\n\n"
-        f"Order: <code>{oid}</code>\n"
-        f"Amount: <b>₹{amount}</b>\n"
-        f"UPI ID: <code>{html_escape(upi_id)}</code>\n"
-        f"Name: {html_escape(upi_name)}\n\n"
-        "<b>Instructions</b>\n"
-        "1. Pay the exact amount.\n"
-        f"2. Use <code>{oid}</code> as the payment note if supported.\n"
-        "3. Submit your UTR after payment.\n\n"
-        "⏳ Payment window: 10 minutes"
-    )
+    caption = UI.text("manual_upi", {
+        "order_id": oid,
+        "amount": amount,
+        "upi_id": html_escape(upi_id),
+        "upi_name": html_escape(upi_name),
+        "payment_window_minutes": payment.get("payment_window_minutes", 10),
+    }, field="caption")
 
     qr_message = await query.message.reply_photo(
         photo=buf,
@@ -453,10 +490,7 @@ async def send_manual_upi(query, context, oid: str) -> None:
     )
 
     status_message = await query.message.reply_text(
-        "<b>⏳ PAYMENT PENDING</b>\n\n"
-        f"Order: <code>{oid}</code>\n"
-        f"Amount: <b>₹{amount}</b>\n\n"
-        "Complete the payment and submit your UTR.",
+        UI.text("payment_pending", {"order_id": oid, "amount": amount}),
         parse_mode=ParseMode.HTML,
         reply_markup=payment_action_menu(oid),
     )
@@ -473,17 +507,17 @@ async def send_manual_upi(query, context, oid: str) -> None:
         },
     )
 
-    await query.answer("Payment instructions sent.")
+    await query.answer(UI.text("alerts", field="payment_instructions_sent"))
 
 
 async def cancel_order(query, oid: str) -> None:
     order = await asyncio.to_thread(fb_get, f"orders/{oid}")
     if not order or order.get("telegram_id") != query.from_user.id:
-        await query.answer("Order not found.", show_alert=True)
+        await query.answer(UI.text("generic", field="order_not_found"), show_alert=True)
         return
 
     if order.get("status") in {"completed", "cancelled", "payment_rejected", "expired"}:
-        await query.answer("This order is already closed.", show_alert=True)
+        await query.answer(UI.text("generic", field="order_already_closed"), show_alert=True)
         return
 
     await asyncio.to_thread(
@@ -503,17 +537,16 @@ async def cancel_order(query, oid: str) -> None:
             logger.info("Could not delete QR message for %s", oid)
 
     await query.edit_message_text(
-        "<b>🔴 ORDER CANCELLED</b>\n\n"
-        f"Order <code>{oid}</code> has been cancelled.",
+        UI.text("order_cancelled", {"order_id": oid}),
         parse_mode=ParseMode.HTML,
-        reply_markup=order_back_menu(),
+        reply_markup=UI.keyboard("order_cancelled"),
     )
 
 
 async def request_utr(query, context: ContextTypes.DEFAULT_TYPE, oid: str) -> None:
     order = await asyncio.to_thread(fb_get, f"orders/{oid}")
     if not order or order.get("telegram_id") != query.from_user.id:
-        await query.answer("Order not found.", show_alert=True)
+        await query.answer(UI.text("generic", field="order_not_found"), show_alert=True)
         return
 
     if now_ms() > int(order.get("payment_deadline", 0)):
@@ -522,7 +555,7 @@ async def request_utr(query, context: ContextTypes.DEFAULT_TYPE, oid: str) -> No
             f"orders/{oid}",
             {"status": "expired", "payment_status": "expired", "updated_at": now_ms()},
         )
-        await query.answer("Payment window expired. Create a new order.", show_alert=True)
+        await query.answer(UI.text("generic", field="payment_window_expired"), show_alert=True)
         return
 
     await asyncio.to_thread(
@@ -531,8 +564,6 @@ async def request_utr(query, context: ContextTypes.DEFAULT_TYPE, oid: str) -> No
         {"status": "awaiting_utr", "updated_at": now_ms()},
     )
 
-    # Keep the pending UTR order in Firebase as well as memory. This is important
-    # for GitHub Actions because the runner/process can restart at any time.
     context.user_data["awaiting_utr_order"] = oid
     await asyncio.to_thread(
         fb_update,
@@ -541,9 +572,7 @@ async def request_utr(query, context: ContextTypes.DEFAULT_TYPE, oid: str) -> No
     )
 
     await query.message.reply_text(
-        "<b>🧾 SUBMIT UTR</b>\n\n"
-        "Please send your UTR/reference number.\n\n"
-        "Example:\n<code>123456789012</code>",
+        UI.text("submit_utr"),
         parse_mode=ParseMode.HTML,
     )
     await query.answer()
@@ -584,10 +613,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             oid = user_record.get("pending_utr_order")
         except Exception:
             logger.exception("Failed to recover pending UTR order for user %s", uid)
-            await message.reply_text(
-                "⚠️ I couldn't find your pending order right now. "
-                "Please press Submit UTR again."
-            )
+            await message.reply_text(UI.text("alerts", field="pending_order_missing"), parse_mode=ParseMode.HTML)
             return
 
     if not oid:
@@ -607,8 +633,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     if not 6 <= len(normalized_utr) <= 40:
         await message.reply_text(
-            "❌ Please send a valid UTR/reference number.\n\n"
-            "Example: <code>123456789012</code>",
+            UI.text("alerts", field="invalid_utr"),
             parse_mode=ParseMode.HTML,
         )
         return
@@ -620,9 +645,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         order = await asyncio.to_thread(fb_get, f"orders/{oid}")
     except Exception:
         logger.exception("Failed to load order %s for UTR submission", oid)
-        await message.reply_text(
-            "⚠️ I couldn't load your order right now. Please try again."
-        )
+        await message.reply_text(UI.text("alerts", field="order_load_failed"), parse_mode=ParseMode.HTML)
         return
 
     if not order or str(order.get("telegram_id")) != uid:
@@ -640,9 +663,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         except Exception:
             logger.exception("Failed to clear invalid pending UTR marker for %s", uid)
 
-        await message.reply_text(
-            "That order is no longer available."
-        )
+        await message.reply_text(UI.text("alerts", field="order_unavailable"), parse_mode=ParseMode.HTML)
         return
 
     status = str(order.get("status", ""))
@@ -662,14 +683,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         except Exception:
             logger.exception("Failed to clear closed-order marker for %s", uid)
 
-        await message.reply_text("This order is already closed.")
+        await message.reply_text(UI.text("alerts", field="order_closed"), parse_mode=ParseMode.HTML)
         return
 
     if status not in {"awaiting_utr", "awaiting_payment"}:
-        await message.reply_text(
-            "This order is not currently waiting for a UTR. "
-            "Please use Submit UTR again."
-        )
+        await message.reply_text(UI.text("alerts", field="order_not_waiting_utr"), parse_mode=ParseMode.HTML)
         return
 
     # -------------------------------------------------------------------------
@@ -737,10 +755,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         )
 
         if duplicate:
-            await message.reply_text(
-                "⚠️ This UTR has already been submitted for another order.\n"
-                "Please check the UTR and try again."
-            )
+            await message.reply_text(UI.text("alerts", field="utr_duplicate"), parse_mode=ParseMode.HTML)
             return
 
     except Exception:
@@ -771,10 +786,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             "CRITICAL: Firebase failed to save UTR for order %s",
             oid,
         )
-        await message.reply_text(
-            "⚠️ I couldn't save the UTR right now. "
-            "Please try again in a moment."
-        )
+        await message.reply_text(UI.text("alerts", field="utr_save_failed"), parse_mode=ParseMode.HTML)
         return
 
     # -------------------------------------------------------------------------
@@ -796,10 +808,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                 saved_utr,
                 saved_status,
             )
-            await message.reply_text(
-                "⚠️ The UTR could not be confirmed as saved. "
-                "Please try again."
-            )
+            await message.reply_text(UI.text("alerts", field="utr_verify_failed"), parse_mode=ParseMode.HTML)
             return
 
     except Exception:
@@ -807,11 +816,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             "Could not verify saved UTR for order %s",
             oid,
         )
-        await message.reply_text(
-            "⚠️ The UTR was submitted, but I couldn't confirm the save yet. "
-            "Please do not submit a different UTR; contact support if the "
-            "order does not update."
-        )
+        await message.reply_text(UI.text("alerts", field="utr_verify_unknown"), parse_mode=ParseMode.HTML)
         return
 
     # -------------------------------------------------------------------------
@@ -842,10 +847,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     # 9. Tell the user the actual result.
     # -------------------------------------------------------------------------
     await message.reply_text(
-        "<b>✅ UTR SUBMITTED</b>\n\n"
-        f"Order: <code>{html_escape(oid)}</code>\n"
-        f"UTR: <code>{html_escape(normalized_utr)}</code>\n\n"
-        "Your payment is now waiting for manual verification.",
+        UI.text("utr_submitted", {
+            "order_id": oid,
+            "utr": normalized_utr,
+        }),
         parse_mode=ParseMode.HTML,
     )
 
@@ -896,15 +901,15 @@ async def send_admin_review(update: Update, oid: str) -> None:
 
 async def approve_order(query, context: ContextTypes.DEFAULT_TYPE, oid: str) -> None:
     if not is_admin(query.from_user.id):
-        await query.answer("Admin only.", show_alert=True)
+        await query.answer(UI.text("alerts", field="admin_only"), show_alert=True)
         return
 
     order = await asyncio.to_thread(fb_get, f"orders/{oid}")
     if not order:
-        await query.answer("Order not found.", show_alert=True)
+        await query.answer(UI.text("alerts", field="admin_order_not_found"), show_alert=True)
         return
     if order.get("status") != "awaiting_verification":
-        await query.answer("This order is no longer awaiting verification.", show_alert=True)
+        await query.answer(UI.text("alerts", field="admin_order_closed"), show_alert=True)
         return
 
     product_id = order.get("product_id", "website")
@@ -912,12 +917,12 @@ async def approve_order(query, context: ContextTypes.DEFAULT_TYPE, oid: str) -> 
     plan = await asyncio.to_thread(get_plan, product_id, plan_id)
     product = await asyncio.to_thread(get_product, product_id)
     if not plan or not product:
-        await query.answer("Product/plan configuration missing.", show_alert=True)
+        await query.answer(UI.text("alerts", field="config_missing"), show_alert=True)
         return
 
     duration_days = int(plan.get("duration_days", 0))
     if duration_days <= 0:
-        await query.answer("Invalid plan duration.", show_alert=True)
+        await query.answer(UI.text("alerts", field="invalid_plan_duration"), show_alert=True)
         return
 
     # Idempotency guard: a second click cannot create a second purchase.
@@ -973,11 +978,10 @@ async def approve_order(query, context: ContextTypes.DEFAULT_TYPE, oid: str) -> 
 
     try:
         await query.edit_message_text(
-            "<b>✅ PAYMENT APPROVED</b>\n\n"
-            f"Order: <code>{oid}</code>\n"
-            f"Purchase: <code>{pid}</code>\n"
-            f"Key issued to the customer.\n\n"
-            "Status: Active",
+            UI.text("payment_approved_admin", {
+                "order_id": oid,
+                "purchase_id": pid,
+            }),
             parse_mode=ParseMode.HTML,
         )
     except Exception:
@@ -987,21 +991,32 @@ async def approve_order(query, context: ContextTypes.DEFAULT_TYPE, oid: str) -> 
     try:
         destination = product_url(product)
         buttons = []
+        approved_ui = UI.get_state("payment_approved_customer")
         if destination and "YOUR-WEBSITE-URL" not in destination:
-            buttons.append([InlineKeyboardButton("🌐 Open Product", url=destination)])
-        buttons.append([InlineKeyboardButton("📦 My Orders", callback_data="my_orders", style="primary")])
+            buttons.append([
+                InlineKeyboardButton(
+                    approved_ui.get("product_button", "🌐 Open Product"),
+                    url=destination,
+                )
+            ])
+        buttons.append([
+            InlineKeyboardButton(
+                approved_ui.get("orders_button", "📦 My Orders"),
+                callback_data="my_orders",
+                style="primary",
+            )
+        ])
 
         await context.bot.send_message(
             chat_id=int(order["telegram_id"]),
-            text=(
-                "<b>🎉 PAYMENT APPROVED</b>\n\n"
-                "Your premium access is now active.\n\n"
-                f"📦 Plan: {html_escape(plan.get('name', plan_id))}\n"
-                f"💰 Paid: ₹{order.get('amount')}\n\n"
-                f"🔑 <b>Your Premium Key</b>\n\n"
-                f"<code>{raw_key}</code>\n\n"
-                f"⏰ Expires: <code>{datetime.fromtimestamp(expires_at / 1000, timezone.utc).strftime('%d %b %Y %H:%M UTC')}</code>"
-            ),
+            text=UI.text("payment_approved_customer", {
+                "plan_name": plan.get("name", plan_id),
+                "amount": order.get("amount"),
+                "key": raw_key,
+                "expires_at": datetime.fromtimestamp(
+                    expires_at / 1000, timezone.utc
+                ).strftime("%d %b %Y %H:%M UTC"),
+            }),
             parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup(buttons),
         )
@@ -1011,15 +1026,15 @@ async def approve_order(query, context: ContextTypes.DEFAULT_TYPE, oid: str) -> 
 
 async def reject_order(query, oid: str) -> None:
     if not is_admin(query.from_user.id):
-        await query.answer("Admin only.", show_alert=True)
+        await query.answer(UI.text("alerts", field="admin_only"), show_alert=True)
         return
 
     order = await asyncio.to_thread(fb_get, f"orders/{oid}")
     if not order:
-        await query.answer("Order not found.", show_alert=True)
+        await query.answer(UI.text("alerts", field="admin_order_not_found"), show_alert=True)
         return
     if order.get("status") != "awaiting_verification":
-        await query.answer("This order is no longer awaiting verification.", show_alert=True)
+        await query.answer(UI.text("alerts", field="admin_order_closed"), show_alert=True)
         return
 
     await asyncio.to_thread(
@@ -1035,8 +1050,7 @@ async def reject_order(query, oid: str) -> None:
 
     try:
         await query.edit_message_text(
-            "<b>❌ PAYMENT REJECTED</b>\n\n"
-            f"Order: <code>{oid}</code> has been rejected.",
+            UI.text("payment_rejected_admin", {"order_id": oid}),
             parse_mode=ParseMode.HTML,
         )
     except Exception:
@@ -1045,12 +1059,7 @@ async def reject_order(query, oid: str) -> None:
     try:
         await query.get_bot().send_message(
             chat_id=int(order["telegram_id"]),
-            text=(
-                "<b>❌ PAYMENT NOT APPROVED</b>\n\n"
-                f"Order: <code>{oid}</code>\n\n"
-                "Your payment could not be verified.\n"
-                "Please contact support if you believe this was a mistake."
-            ),
+            text=UI.text("payment_rejected_customer", {"order_id": oid}),
             parse_mode=ParseMode.HTML,
             reply_markup=order_back_menu(),
         )
@@ -1060,11 +1069,11 @@ async def reject_order(query, oid: str) -> None:
 
 async def admin_detail(query, oid: str) -> None:
     if not is_admin(query.from_user.id):
-        await query.answer("Admin only.", show_alert=True)
+        await query.answer(UI.text("alerts", field="admin_only"), show_alert=True)
         return
     order = await asyncio.to_thread(fb_get, f"orders/{oid}")
     if not order:
-        await query.answer("Order not found.", show_alert=True)
+        await query.answer(UI.text("alerts", field="admin_order_not_found"), show_alert=True)
         return
     await query.message.reply_text(
         "<b>🔎 ORDER DETAILS</b>\n\n<pre>" + html_escape(json.dumps(order, indent=2)) + "</pre>",
@@ -1078,18 +1087,11 @@ async def admin_detail(query, oid: str) -> None:
 # -----------------------------------------------------------------------------
 
 async def show_orders(query) -> None:
-    """
-    Show the user's active premium purchases.
-
-    This deliberately reads the purchases collection once and filters locally.
-    It avoids Firebase order_by_child/equal_to query issues and uses the
-    purchase record (the source of truth for active premium access).
-    """
+    """Show active premium purchases; Firebase UI controls text/button labels."""
     uid = int(query.from_user.id)
 
     try:
         all_purchases = await asyncio.to_thread(fb_get, "purchases") or {}
-
         active_purchases = []
 
         for pid, purchase in all_purchases.items():
@@ -1105,104 +1107,70 @@ async def show_orders(query) -> None:
                 and expires_at > now_ms()
                 and purchase.get("encrypted_key")
             ):
-                active_purchases.append({
-                    "purchase_id": str(pid),
-                    **purchase,
-                })
+                active_purchases.append({"purchase_id": str(pid), **purchase})
 
-        active_purchases.sort(
-            key=lambda p: int(p.get("expires_at", 0)),
-            reverse=True,
-        )
+        active_purchases.sort(key=lambda p: int(p.get("expires_at", 0)), reverse=True)
 
-        buttons = []
-
+        rows = []
         for purchase in active_purchases:
             plan = await asyncio.to_thread(
                 get_plan,
                 purchase.get("product_id", "website"),
                 purchase.get("plan_id", ""),
             )
-
-            plan_name = (plan or {}).get(
-                "name",
-                purchase.get("plan_id", "Premium"),
-            )
-
-            # Purchase ID is short and keeps callback_data safely under
-            # Telegram's 64-byte callback-data limit.
-            buttons.append([
-                InlineKeyboardButton(
-                    f"🟢 {plan_name} · ₹{purchase.get('amount', 0)}",
-                    callback_data=f"purchase:view:{purchase['purchase_id']}",
-                    style="success",
+            plan_name = (plan or {}).get("name", purchase.get("plan_id", "Premium"))
+            rows.append([
+                UI.button(
+                    "my_orders",
+                    "active_button",
+                    {
+                        "plan_name": plan_name,
+                        "amount": purchase.get("amount", 0),
+                        "purchase_id": purchase["purchase_id"],
+                    },
+                    f"purchase:view:{purchase['purchase_id']}",
+                    "success",
                 )
             ])
 
         if active_purchases:
-            message = (
-                "<b>📦 MY ORDERS</b>\n\n"
-                "<b>🟢 ACTIVE PREMIUM</b>\n\n"
-                "Tap your active order below to view your premium key."
-            )
+            message = UI.text("my_orders", field="text_active")
         else:
-            message = (
-                "<b>📦 MY ORDERS</b>\n\n"
-                "You currently have no active premium orders."
-            )
+            message = UI.text("my_orders", field="text_empty")
 
-        buttons.append([
-            InlineKeyboardButton(
-                "◀️ Back to Main Menu",
-                callback_data="home",
-                style="primary",
+        rows.append([
+            UI.button(
+                "my_orders",
+                "back_button",
+                {},
+                "home",
+                "primary",
             )
         ])
 
         await query.edit_message_text(
             message,
             parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup(buttons),
+            reply_markup=InlineKeyboardMarkup(rows),
         )
 
     except Exception:
-        logger.exception(
-            "My Orders failed for Telegram user %s",
-            uid,
-        )
-
+        logger.exception("My Orders failed for Telegram user %s", uid)
         await query.edit_message_text(
-            "<b>⚠️ MY ORDERS</b>\n\n"
-            "I couldn't load your active orders right now.\n\n"
-            "Please try again.",
+            UI.text("my_orders", field="text_error"),
             parse_mode=ParseMode.HTML,
-            reply_markup=order_back_menu(),
+            reply_markup=UI.keyboard("order_cancelled"),
         )
 
 
 async def show_purchase_detail(query, purchase_id_value: str) -> None:
-    """Display and recover the key for one active purchase."""
     uid = int(query.from_user.id)
 
     try:
-        purchase = await asyncio.to_thread(
-            fb_get,
-            f"purchases/{purchase_id_value}",
-        )
+        purchase = await asyncio.to_thread(fb_get, f"purchases/{purchase_id_value}")
 
-        if not purchase:
-            await query.answer(
-                "Purchase not found.",
-                show_alert=True,
-            )
-            return
-
-        # Never allow one Telegram user to open another user's purchase.
-        if int(purchase.get("telegram_id", 0)) != uid:
-            await query.answer(
-                "Purchase not found.",
-                show_alert=True,
-            )
+        if not purchase or int(purchase.get("telegram_id", 0)) != uid:
+            await query.answer(UI.text("generic", field="purchase_not_found"), show_alert=True)
             return
 
         expires_at = int(purchase.get("expires_at", 0))
@@ -1212,110 +1180,95 @@ async def show_purchase_detail(query, purchase_id_value: str) -> None:
             or expires_at <= now_ms()
             or not purchase.get("encrypted_key")
         ):
-            await query.answer(
-                "This premium order is no longer active.",
-                show_alert=True,
-            )
+            await query.answer(UI.text("generic", field="purchase_inactive"), show_alert=True)
             return
 
         raw_key = decrypt_key(purchase["encrypted_key"])
-
         product_id = purchase.get("product_id", "website")
         plan_id = purchase.get("plan_id", "")
-
-        plan = await asyncio.to_thread(
-            get_plan,
-            product_id,
-            plan_id,
-        )
-
-        product = await asyncio.to_thread(
-            get_product,
-            product_id,
-        )
+        plan = await asyncio.to_thread(get_plan, product_id, plan_id)
+        product = await asyncio.to_thread(get_product, product_id)
 
         expires_text = datetime.fromtimestamp(
-            expires_at / 1000,
-            timezone.utc,
+            expires_at / 1000, timezone.utc
         ).strftime("%d %b %Y %H:%M UTC")
 
-        buttons = []
+        values = {
+            "purchase_id": purchase_id_value,
+            "order_id": purchase.get("order_id", ""),
+            "plan_name": (plan or {}).get("name", plan_id or "Premium"),
+            "amount": purchase.get("amount", 0),
+            "key": raw_key,
+            "expires_at": expires_text,
+        }
 
+        rows = []
         destination = product_url(product or {})
-
         if destination and "YOUR-WEBSITE-URL" not in destination:
-            buttons.append([
+            rows.append([
                 InlineKeyboardButton(
-                    "🌐 Open Product",
+                    UI.get_state("active_order").get("product_button", "🌐 Open Product"),
                     url=destination,
                 )
             ])
 
-        buttons.append([
-            InlineKeyboardButton(
-                "📦 Back to My Orders",
-                callback_data="my_orders",
-                style="primary",
+        rows.append([
+            UI.button(
+                "active_order",
+                "back_button",
+                {},
+                "my_orders",
+                "primary",
             )
         ])
 
         await query.edit_message_text(
-            "<b>🔑 ACTIVE PREMIUM ORDER</b>\n\n"
-            f"Purchase: <code>{html_escape(purchase_id_value)}</code>\n"
-            f"Order: <code>{html_escape(purchase.get('order_id', ''))}</code>\n"
-            f"Plan: <b>{html_escape((plan or {}).get('name', plan_id or 'Premium'))}</b>\n"
-            f"Paid: <b>₹{purchase.get('amount', 0)}</b>\n\n"
-            "<b>🔑 Your Premium Key</b>\n\n"
-            f"<code>{html_escape(raw_key)}</code>\n\n"
-            f"⏰ Expires: <code>{expires_text}</code>\n\n"
-            "You can open this order again anytime from "
-            "<b>My Orders</b> while it remains active.",
+            UI.text("active_order", values),
             parse_mode=ParseMode.HTML,
-            reply_markup=InlineKeyboardMarkup(buttons),
+            reply_markup=InlineKeyboardMarkup(rows),
         )
 
     except (InvalidToken, TypeError, ValueError):
-        logger.exception(
-            "Key recovery/decryption failed for purchase %s",
-            purchase_id_value,
-        )
-
+        logger.exception("Key recovery/decryption failed for purchase %s", purchase_id_value)
         await query.edit_message_text(
-            "<b>⚠️ KEY RECOVERY ERROR</b>\n\n"
-            "Your premium purchase exists, but the key could not be recovered.\n\n"
-            "Please contact support.",
+            UI.text("key_recovery_error"),
             parse_mode=ParseMode.HTML,
-            reply_markup=order_back_menu(),
+            reply_markup=UI.keyboard("order_cancelled"),
         )
 
     except Exception:
-        logger.exception(
-            "Purchase detail failed for Telegram user %s / purchase %s",
-            uid,
-            purchase_id_value,
-        )
-
+        logger.exception("Purchase detail failed for user %s / purchase %s", uid, purchase_id_value)
         await query.edit_message_text(
-            "<b>⚠️ ORDER ERROR</b>\n\n"
-            "I couldn't open this premium order right now.\n\n"
-            "Please try again.",
+            UI.text("order_error"),
             parse_mode=ParseMode.HTML,
-            reply_markup=order_back_menu(),
+            reply_markup=UI.keyboard("order_cancelled"),
         )
 
 
 async def show_support(query) -> None:
     settings = await asyncio.to_thread(get_settings)
     username = settings.get("support", {}).get("telegram_username", "").strip().lstrip("@")
-    text = (
-        "<b>📞 SUPPORT / HELP</b>\n\n"
-        "For payment or premium-access issues, contact support."
-    )
-    buttons = []
+
+    state = UI.get_state("support")
+    rows = []
+
     if username:
-        buttons.append([InlineKeyboardButton("📞 Contact Support", url=f"https://t.me/{username}")])
-    buttons.append([InlineKeyboardButton("◀️ Back to Main Menu", callback_data="home", style="primary")])
-    await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=InlineKeyboardMarkup(buttons))
+        rows.append([
+            InlineKeyboardButton(
+                state.get("contact_button", "📞 Contact Support"),
+                url=f"https://t.me/{username}",
+            )
+        ])
+
+    rows.append([
+        UI.button("support", "back_button", {}, "home", "primary")
+    ])
+
+    await query.edit_message_text(
+        UI.text("support"),
+        parse_mode=ParseMode.HTML,
+        reply_markup=InlineKeyboardMarkup(rows),
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -1335,33 +1288,48 @@ async def resend_key(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         if p.get("status") == "active" and int(p.get("expires_at", 0)) > now_ms()
     ]
     if not active:
-        await update.message.reply_text("No active premium purchase was found.")
+        await update.message.reply_text(UI.text("my_orders", field="text_empty"), parse_mode=ParseMode.HTML)
         return
 
     pid, purchase = sorted(active, key=lambda item: int(item[1].get("expires_at", 0)), reverse=True)[0]
     encrypted = purchase.get("encrypted_key")
     if not encrypted:
-        await update.message.reply_text("Your key cannot be recovered. Please contact support.")
+        await update.message.reply_text(UI.text("key_recovery_error"), parse_mode=ParseMode.HTML)
         return
 
     try:
         raw_key = decrypt_key(encrypted)
     except InvalidToken:
         logger.error("Could not decrypt key for purchase %s", pid)
-        await update.message.reply_text("Your key cannot be recovered. Please contact support.")
+        await update.message.reply_text(UI.text("key_recovery_error"), parse_mode=ParseMode.HTML)
         return
 
     product = await asyncio.to_thread(get_product, purchase.get("product_id", "website"))
     destination = product_url(product or {})
     buttons = []
+    delivery_ui = UI.get_state("key_delivery")
     if destination and "YOUR-WEBSITE-URL" not in destination:
-        buttons.append([InlineKeyboardButton("🌐 Open Product", url=destination)])
-    buttons.append([InlineKeyboardButton("📦 My Orders", callback_data="my_orders", style="primary")])
+        buttons.append([
+            InlineKeyboardButton(
+                delivery_ui.get("product_button", "🌐 Open Product"),
+                url=destination,
+            )
+        ])
+    buttons.append([
+        InlineKeyboardButton(
+            delivery_ui.get("orders_button", "📦 My Orders"),
+            callback_data="my_orders",
+            style="primary",
+        )
+    ])
 
     await update.message.reply_text(
-        "<b>🔑 YOUR PREMIUM KEY</b>\n\n"
-        f"<code>{raw_key}</code>\n\n"
-        f"⏰ Expires: <code>{datetime.fromtimestamp(int(purchase['expires_at']) / 1000, timezone.utc).strftime('%d %b %Y %H:%M UTC')}</code>",
+        UI.text("key_delivery", {
+            "key": raw_key,
+            "expires_at": datetime.fromtimestamp(
+                int(purchase["expires_at"]) / 1000, timezone.utc
+            ).strftime("%d %b %Y %H:%M UTC"),
+        }),
         parse_mode=ParseMode.HTML,
         reply_markup=InlineKeyboardMarkup(buttons),
     )
@@ -1376,7 +1344,7 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         lambda: db.reference("orders").order_by_child("status").equal_to("awaiting_verification").get() or {}
     )
     if not pending:
-        await update.message.reply_text("<b>📋 No pending payment verifications.</b>", parse_mode=ParseMode.HTML)
+        await update.message.reply_text(UI.text("alerts", field="no_pending_admin"), parse_mode=ParseMode.HTML)
         return
 
     for oid, order in pending.items():
