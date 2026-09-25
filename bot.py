@@ -234,7 +234,7 @@ def main_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🌐 Website Premium", callback_data="product:website", style="success")],
         [
-            InlineKeyboardButton("📦 My Orders", callback_data="orders", style="primary"),
+            InlineKeyboardButton("📦 My Orders", callback_data="my_orders", style="primary"),
             InlineKeyboardButton("📞 Support / Help", callback_data="support", style="primary"),
         ],
     ])
@@ -801,7 +801,7 @@ async def approve_order(query, context: ContextTypes.DEFAULT_TYPE, oid: str) -> 
         buttons = []
         if destination and "YOUR-WEBSITE-URL" not in destination:
             buttons.append([InlineKeyboardButton("🌐 Open Product", url=destination)])
-        buttons.append([InlineKeyboardButton("📦 My Orders", callback_data="orders", style="primary")])
+        buttons.append([InlineKeyboardButton("📦 My Orders", callback_data="my_orders", style="primary")])
 
         await context.bot.send_message(
             chat_id=int(order["telegram_id"]),
@@ -902,17 +902,11 @@ async def get_purchase_for_order(uid: int, oid: str, order: dict[str, Any]) -> O
         lambda: db.reference("purchases").order_by_child("telegram_id").equal_to(uid).get() or {}
     )
 
-    matches = [
-        (pid, purchase)
-        for pid, purchase in purchases.items()
-        if str(purchase.get("order_id", "")) == str(oid)
-    ]
+    for pid, purchase in purchases.items():
+        if str(purchase.get("order_id", "")) == str(oid):
+            return {"purchase_id": pid, **purchase}
 
-    if not matches:
-        return None
-
-    pid, purchase = matches[-1]
-    return {"purchase_id": pid, **purchase}
+    return None
 
 
 def order_is_active_purchase(purchase: Optional[dict[str, Any]]) -> bool:
@@ -928,10 +922,10 @@ def order_is_active_purchase(purchase: Optional[dict[str, Any]]) -> bool:
 def order_status_label(order: dict[str, Any], purchase: Optional[dict[str, Any]]) -> str:
     if order_is_active_purchase(purchase):
         return "🟢 ACTIVE"
+
     if purchase and int(purchase.get("expires_at", 0)) <= now_ms():
         return "⚪ EXPIRED"
 
-    status = str(order.get("status", "unknown"))
     labels = {
         "completed": "✅ COMPLETED",
         "awaiting_verification": "⏳ VERIFYING",
@@ -939,114 +933,209 @@ def order_status_label(order: dict[str, Any], purchase: Optional[dict[str, Any]]
         "cancelled": "🔴 CANCELLED",
         "expired": "⚪ EXPIRED",
     }
+
+    status = str(order.get("status", "unknown"))
     return labels.get(status, status.upper())
 
 
 async def show_orders(query) -> None:
+    """Display active purchases first, with clickable key recovery buttons."""
     uid = query.from_user.id
-    orders = await asyncio.to_thread(
-        lambda: db.reference("orders").order_by_child("telegram_id").equal_to(uid).get() or {}
-    )
 
-    if not orders:
-        await query.edit_message_text(
-            "<b>📦 MY ORDERS</b>\n\nYou don't have any orders yet.",
-            parse_mode=ParseMode.HTML,
-            reply_markup=order_back_menu(),
+    try:
+        # Active purchases are the source of truth for premium access.
+        purchases = await asyncio.to_thread(
+            lambda: db.reference("purchases")
+            .order_by_child("telegram_id")
+            .equal_to(uid)
+            .get() or {}
         )
-        return
 
-    active_rows = []
-    history_rows = []
+        active_purchases = []
+        expired_purchases = []
 
-    for oid, order in list(orders.items())[-10:][::-1]:
-        plan = await asyncio.to_thread(
-            get_plan,
-            order.get("product_id", "website"),
-            order.get("plan_id", ""),
+        for pid, purchase in purchases.items():
+            purchase_data = {"purchase_id": pid, **purchase}
+
+            if purchase.get("status") == "active":
+                if int(purchase.get("expires_at", 0)) > now_ms():
+                    active_purchases.append(purchase_data)
+                else:
+                    expired_purchases.append(purchase_data)
+
+        # Newest/longest-valid access first.
+        active_purchases.sort(
+            key=lambda p: int(p.get("expires_at", 0)),
+            reverse=True,
         )
-        plan_name = (plan or {}).get("name", order.get("plan_id", ""))
 
-        purchase = None
-        if order.get("status") == "completed" or order.get("purchase_id"):
-            purchase = await get_purchase_for_order(uid, oid, order)
+        buttons = []
+        for purchase in active_purchases:
+            plan = await asyncio.to_thread(
+                get_plan,
+                purchase.get("product_id", "website"),
+                purchase.get("plan_id", ""),
+            )
+            plan_name = (plan or {}).get("name", purchase.get("plan_id", "Premium"))
 
-        status_label = order_status_label(order, purchase)
-
-        if order_is_active_purchase(purchase):
-            active_rows.append([
+            # Short callback: safely below Telegram's 64-byte callback_data limit.
+            buttons.append([
                 InlineKeyboardButton(
-                    f"🟢 {plan_name} · ₹{order.get('amount')}",
-                    callback_data=f"order:view:{oid}",
+                    f"🟢 {plan_name} · ₹{purchase.get('amount', 0)}",
+                    callback_data=f"order:view:{purchase.get('order_id', '')}",
                     style="success",
                 )
             ])
+
+        text_parts = ["<b>📦 MY ORDERS</b>"]
+
+        if active_purchases:
+            text_parts.extend([
+                "",
+                "<b>🟢 ACTIVE PREMIUM</b>",
+                "Tap an active order below to view your key.",
+            ])
         else:
-            history_rows.append(
+            text_parts.extend([
+                "",
+                "You have no active premium orders.",
+            ])
+
+        # Keep a compact history section.
+        orders = await asyncio.to_thread(
+            lambda: db.reference("orders")
+            .order_by_child("telegram_id")
+            .equal_to(uid)
+            .get() or {}
+        )
+
+        history = []
+        for oid, order in list(orders.items())[-10:][::-1]:
+            matching_purchase = None
+            for purchase in purchases.values():
+                if str(purchase.get("order_id", "")) == str(oid):
+                    matching_purchase = purchase
+                    break
+
+            # Don't duplicate currently active purchases in history.
+            if matching_purchase and (
+                matching_purchase.get("status") == "active"
+                and int(matching_purchase.get("expires_at", 0)) > now_ms()
+            ):
+                continue
+
+            plan = await asyncio.to_thread(
+                get_plan,
+                order.get("product_id", "website"),
+                order.get("plan_id", ""),
+            )
+            plan_name = (plan or {}).get("name", order.get("plan_id", ""))
+
+            history.append(
                 f"<b>#{html_escape(oid)}</b>\n"
-                f"{html_escape(plan_name)} · ₹{order.get('amount')}\n"
-                f"Status: <b>{html_escape(status_label)}</b>"
+                f"{html_escape(plan_name)} · ₹{order.get('amount', 0)}\n"
+                f"Status: <b>{html_escape(order_status_label(order, matching_purchase))}</b>"
             )
 
-    buttons = list(active_rows)
-    buttons.append([
-        InlineKeyboardButton(
-            "◀️ Back to Main Menu",
-            callback_data="home",
-            style="primary",
+        if history:
+            text_parts.extend([
+                "",
+                "<b>📜 ORDER HISTORY</b>",
+                "",
+                "\n\n".join(history),
+            ])
+
+        buttons.append([
+            InlineKeyboardButton(
+                "◀️ Back to Main Menu",
+                callback_data="home",
+                style="primary",
+            )
+        ])
+
+        await query.edit_message_text(
+            "\n".join(text_parts),
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(buttons),
         )
-    ])
 
-    text_parts = ["<b>📦 MY ORDERS</b>"]
-
-    if active_rows:
-        text_parts.extend([
-            "",
-            "<b>🟢 ACTIVE PREMIUM</b>",
-            "Tap an active order to view your premium key anytime.",
-        ])
-    else:
-        text_parts.extend([
-            "",
-            "You have no active premium orders.",
-        ])
-
-    if history_rows:
-        text_parts.extend([
-            "",
-            "<b>📜 ORDER HISTORY</b>",
-            "",
-            "\n\n".join(history_rows),
-        ])
-
-    await query.edit_message_text(
-        "\n".join(text_parts),
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(buttons),
-    )
+    except Exception:
+        logger.exception("My Orders failed for Telegram user %s", uid)
+        await query.edit_message_text(
+            "<b>⚠️ MY ORDERS</b>\n\n"
+            "I couldn't load your orders right now. Please try again.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=order_back_menu(),
+        )
 
 
 async def show_order_detail(query, oid: str) -> None:
     """Show the customer's active purchase and recover its decrypted key."""
     uid = query.from_user.id
 
-    order = await asyncio.to_thread(fb_get, f"orders/{oid}")
-    if not order or int(order.get("telegram_id", 0)) != int(uid):
-        await query.answer("Order not found.", show_alert=True)
-        return
-
-    purchase = await get_purchase_for_order(uid, oid, order)
-
-    if not order_is_active_purchase(purchase):
-        await query.answer("This premium order is no longer active.", show_alert=True)
-        return
-
-    encrypted_key = purchase.get("encrypted_key")
-
     try:
+        order = await asyncio.to_thread(fb_get, f"orders/{oid}")
+
+        # Ownership is mandatory.
+        if not order or int(order.get("telegram_id", 0)) != int(uid):
+            await query.answer("Order not found.", show_alert=True)
+            return
+
+        purchase = await get_purchase_for_order(uid, oid, order)
+
+        if not order_is_active_purchase(purchase):
+            await query.answer(
+                "This premium order is no longer active.",
+                show_alert=True,
+            )
+            return
+
+        encrypted_key = purchase.get("encrypted_key")
         raw_key = decrypt_key(encrypted_key)
+
+        product_id = purchase.get("product_id", order.get("product_id", "website"))
+        plan_id = purchase.get("plan_id", order.get("plan_id", ""))
+
+        plan = await asyncio.to_thread(get_plan, product_id, plan_id)
+        product = await asyncio.to_thread(get_product, product_id)
+
+        expires_at = int(purchase.get("expires_at", 0))
+        expires_text = datetime.fromtimestamp(
+            expires_at / 1000,
+            timezone.utc,
+        ).strftime("%d %b %Y %H:%M UTC")
+
+        destination = product_url(product or {})
+        buttons = []
+
+        if destination and "YOUR-WEBSITE-URL" not in destination:
+            buttons.append([
+                InlineKeyboardButton("🌐 Open Product", url=destination)
+            ])
+
+        buttons.append([
+            InlineKeyboardButton(
+                "📦 Back to My Orders",
+                callback_data="my_orders",
+                style="primary",
+            )
+        ])
+
+        await query.edit_message_text(
+            "<b>🔑 ACTIVE PREMIUM ORDER</b>\n\n"
+            f"Order: <code>{html_escape(oid)}</code>\n"
+            f"Plan: <b>{html_escape((plan or {}).get('name', plan_id or 'Premium'))}</b>\n"
+            f"Paid: <b>₹{purchase.get('amount', order.get('amount', 0))}</b>\n\n"
+            "<b>Your Premium Key</b>\n"
+            f"<code>{html_escape(raw_key)}</code>\n\n"
+            f"⏰ Expires: <code>{expires_text}</code>\n\n"
+            "You can return to <b>My Orders</b> and open this active order again anytime.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+
     except (InvalidToken, TypeError, ValueError):
-        logger.exception("Could not decrypt key for purchase %s", purchase.get("purchase_id"))
+        logger.exception("Could not decrypt key for order %s", oid)
         await query.edit_message_text(
             "<b>⚠️ KEY RECOVERY ERROR</b>\n\n"
             "Your purchase is active, but the key could not be recovered. "
@@ -1054,47 +1143,15 @@ async def show_order_detail(query, oid: str) -> None:
             parse_mode=ParseMode.HTML,
             reply_markup=order_back_menu(),
         )
-        return
 
-    product_id = purchase.get("product_id", order.get("product_id", "website"))
-    plan_id = purchase.get("plan_id", order.get("plan_id", ""))
-
-    plan = await asyncio.to_thread(get_plan, product_id, plan_id)
-    product = await asyncio.to_thread(get_product, product_id)
-
-    expires_at = int(purchase.get("expires_at", 0))
-    expires_text = datetime.fromtimestamp(
-        expires_at / 1000, timezone.utc
-    ).strftime("%d %b %Y %H:%M UTC")
-
-    destination = product_url(product or {})
-    buttons = []
-
-    if destination and "YOUR-WEBSITE-URL" not in destination:
-        buttons.append([
-            InlineKeyboardButton("🌐 Open Product", url=destination)
-        ])
-
-    buttons.append([
-        InlineKeyboardButton(
-            "📦 Back to My Orders",
-            callback_data="orders",
-            style="primary",
+    except Exception:
+        logger.exception("Order detail failed for user %s / order %s", uid, oid)
+        await query.edit_message_text(
+            "<b>⚠️ ORDER ERROR</b>\n\n"
+            "I couldn't open this order right now. Please try again.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=order_back_menu(),
         )
-    ])
-
-    await query.edit_message_text(
-        "<b>🔑 ACTIVE PREMIUM ORDER</b>\n\n"
-        f"Order: <code>{html_escape(oid)}</code>\n"
-        f"Plan: <b>{html_escape((plan or {}).get('name', plan_id or 'Premium'))}</b>\n"
-        f"Paid: <b>₹{purchase.get('amount', order.get('amount', 0))}</b>\n\n"
-        "<b>Your Premium Key</b>\n"
-        f"<code>{html_escape(raw_key)}</code>\n\n"
-        f"⏰ Expires: <code>{expires_text}</code>\n\n"
-        "You can return to <b>My Orders</b> and open this active order again anytime.",
-        parse_mode=ParseMode.HTML,
-        reply_markup=InlineKeyboardMarkup(buttons),
-    )
 
 
 async def show_support(query) -> None:
@@ -1149,7 +1206,7 @@ async def resend_key(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     buttons = []
     if destination and "YOUR-WEBSITE-URL" not in destination:
         buttons.append([InlineKeyboardButton("🌐 Open Product", url=destination)])
-    buttons.append([InlineKeyboardButton("📦 My Orders", callback_data="orders", style="primary")])
+    buttons.append([InlineKeyboardButton("📦 My Orders", callback_data="my_orders", style="primary")])
 
     await update.message.reply_text(
         "<b>🔑 YOUR PREMIUM KEY</b>\n\n"
@@ -1192,7 +1249,7 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if data == "product:website":
         await show_product(query, "website")
         return
-    if data == "orders":
+    if data in {"orders", "my_orders"}:
         await show_orders(query)
         return
     if data.startswith("order:view:"):
@@ -1283,9 +1340,23 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     logger.exception("Unhandled Telegram error", exc_info=context.error)
 
 
+async def orders_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+
+    class MessageQueryAdapter:
+        from_user = update.effective_user
+
+        async def edit_message_text(self, *args, **kwargs):
+            return await update.message.reply_text(*args, **kwargs)
+
+    await show_orders(MessageQueryAdapter())
+
+
 def build_application() -> Application:
     application = Application.builder().token(BOT_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("orders", orders_command))
     application.add_handler(CommandHandler("admin", admin_command))
     application.add_handler(CommandHandler("resendkey", resend_key))
     application.add_handler(CallbackQueryHandler(callbacks))
