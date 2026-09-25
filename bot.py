@@ -13,7 +13,13 @@ import qrcode
 import firebase_admin
 from firebase_admin import credentials, db
 from cryptography.fernet import Fernet, InvalidToken
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import (
+    BotCommand,
+    BotCommandScopeChat,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Update,
+)
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
@@ -74,7 +80,7 @@ except Exception as exc:
     raise RuntimeError("KEY_ENCRYPTION_KEY must be a valid Fernet key") from exc
 
 
-from UI import UI, reply_action as ui_reply_action, render as ui_render
+from UI import UI, render as ui_render
 
 # -----------------------------------------------------------------------------
 # Firebase
@@ -337,7 +343,7 @@ def html_escape(value: Any) -> str:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
-    if not user:
+    if not user or not update.message:
         return
     await asyncio.to_thread(ensure_user, user)
     await update.message.reply_text(
@@ -345,12 +351,45 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         parse_mode=ParseMode.HTML,
         reply_markup=UI.keyboard("welcome"),
     )
-    reply_markup = UI.reply_keyboard("welcome")
-    if reply_markup:
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+    await update.message.reply_text(
+        UI.text("help"),
+        parse_mode=ParseMode.HTML,
+        reply_markup=UI.keyboard("help"),
+    )
+
+
+async def plans_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+    product = await asyncio.to_thread(get_product, "website")
+    if not product or not product.get("enabled", True):
         await update.message.reply_text(
-            UI.text("welcome", field="reply_prompt"),
-            reply_markup=reply_markup,
+            UI.text("order_error", {"product_name": "Premium"}),
+            parse_mode=ParseMode.HTML,
+            reply_markup=UI.keyboard("order_cancelled"),
         )
+        return
+    values = {
+        "product_id": "website",
+        "product_name": product.get("name", "Premium"),
+        "description": product.get("description", "Premium access."),
+    }
+    await update.message.reply_text(
+        UI.text("product", values),
+        parse_mode=ParseMode.HTML,
+        reply_markup=plans_menu(product),
+    )
+
+
+async def support_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+    await show_support(MessageQueryAdapter(update.message, update.effective_user))
 
 
 async def show_home(query) -> None:
@@ -623,12 +662,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
 
     if not oid:
-        # Persistent reply-keyboard messages arrive as ordinary text.
-        # Firebase selects the trusted action; the engine executes it.
-        action = ui_reply_action(message.text, "welcome")
-        if action:
-            adapter = MessageQueryAdapter(message, user)
-            await dispatch_action(adapter, context, action, user)
+        # Normal text messages are ignored unless the user is currently
+        # submitting a UTR. Navigation is intentionally handled by inline
+        # keyboards and slash commands only.
         return
 
     oid = str(oid)
@@ -1474,10 +1510,41 @@ async def orders_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await show_orders(MessageQueryAdapter(update.message, update.effective_user))
 
 
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+    await show_orders(MessageQueryAdapter(update.message, update.effective_user))
+
+
+async def set_bot_commands(application: Application) -> None:
+    # Public command menu: /admin is intentionally omitted.
+    public_commands = [
+        BotCommand("start", "Open the main menu"),
+        BotCommand("help", "Show help and commands"),
+        BotCommand("plans", "View premium plans"),
+        BotCommand("orders", "View your orders"),
+        BotCommand("status", "View active premium access"),
+        BotCommand("support", "Contact support"),
+        BotCommand("resendkey", "Recover an active premium key"),
+    ]
+    await application.bot.set_my_commands(public_commands)
+
+    # Admin-only command menu. The command itself is still protected by the
+    # ADMIN_ID check inside admin_command.
+    await application.bot.set_my_commands(
+        public_commands + [BotCommand("admin", "Open admin dashboard")],
+        scope=BotCommandScopeChat(chat_id=ADMIN_ID_INT),
+    )
+
+
 def build_application() -> Application:
-    application = Application.builder().token(BOT_TOKEN).build()
+    application = Application.builder().token(BOT_TOKEN).post_init(set_bot_commands).build()
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("plans", plans_command))
     application.add_handler(CommandHandler("orders", orders_command))
+    application.add_handler(CommandHandler("status", status_command))
+    application.add_handler(CommandHandler("support", support_command))
     application.add_handler(CommandHandler("admin", admin_command))
     application.add_handler(CommandHandler("resendkey", resend_key))
     application.add_handler(CallbackQueryHandler(callbacks))

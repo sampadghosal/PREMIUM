@@ -20,7 +20,7 @@ import re
 from typing import Any, Optional
 
 from firebase_admin import db
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.constants import ParseMode
 
 UI_ROOT = "ui"
@@ -40,22 +40,23 @@ DEFAULT_UI: dict[str, dict[str, Any]] = {
                 ],
             ],
         },
-        "reply_prompt": "Choose an option from the menu below.",
-        "reply_keyboard": {
+    },
+    "help": {
+        "enabled": True,
+        "html": "<b>❓ SILENT PREMIUM — HELP</b>\n\nUse the commands below or the buttons in the message.\n\n<b>Available commands</b>\n/start — Open the main menu\n/help — Show this help\n/plans — View premium plans\n/orders — View your orders\n/status — View your active premium access\n/support — Contact support\n/resendkey — Recover an active premium key\n\n<i>Admin commands are restricted to the configured admin account.</i>",
+        "inline_keyboard": {
             "enabled": True,
-            "resize_keyboard": True,
-            "persistent": True,
             "rows": [
                 [
-                    {"text": "💎 Plans", "action": "product:website"},
-                    {"text": "📊 My Status", "action": "orders"},
+                    {"text": "💎 View Plans", "action": "product:website", "style": "success"},
+                    {"text": "📦 My Orders", "action": "orders", "style": "primary"}
                 ],
                 [
-                    {"text": "❓ Help", "action": "help"},
-                    {"text": "📞 Support", "action": "support"},
-                ],
-            ],
-        },
+                    {"text": "📞 Support", "action": "support", "style": "primary"},
+                    {"text": "🏠 Main Menu", "action": "home", "style": "primary"}
+                ]
+            ]
+        }
     },
     "product": {
         "enabled": True,
@@ -288,68 +289,6 @@ def button(state: str, field: str, values: dict[str, Any], callback_data: str, s
     return InlineKeyboardButton(**kwargs)
 
 
-def reply_keyboard(state: str = "welcome", values: Optional[dict[str, Any]] = None) -> Optional[ReplyKeyboardMarkup]:
-    values = values or {}
-    data = get_state(state)
-    config = data.get("reply_keyboard")
-    if not isinstance(config, dict) or config.get("enabled", False) is False:
-        return None
-
-    rows: list[list[KeyboardButton]] = []
-    for row in config.get("rows", []):
-        built: list[KeyboardButton] = []
-        if not isinstance(row, list):
-            continue
-        for item in row:
-            if isinstance(item, str):
-                built.append(KeyboardButton(str(render(item, values))))
-                continue
-            if not isinstance(item, dict) or item.get("enabled", True) is False:
-                continue
-            label = str(render(item.get("text", "Button"), values))
-            built.append(KeyboardButton(label))
-        if built:
-            rows.append(built)
-
-    if not rows:
-        return None
-
-    kwargs: dict[str, Any] = {
-        "keyboard": rows,
-        "resize_keyboard": bool(config.get("resize_keyboard", True)),
-        "one_time_keyboard": bool(config.get("one_time_keyboard", False)),
-    }
-    if "selective" in config:
-        kwargs["selective"] = bool(config.get("selective"))
-    if "input_field_placeholder" in config:
-        kwargs["input_field_placeholder"] = str(render(config.get("input_field_placeholder"), values))
-    # PTB 22.x supports persistent reply keyboards.
-    if "persistent" in config:
-        kwargs["is_persistent"] = bool(config.get("persistent"))
-    return ReplyKeyboardMarkup(**kwargs)
-
-
-def reply_action(label: str, state: str = "welcome") -> Optional[str]:
-    """Map a persistent reply-keyboard label to its trusted action."""
-    data = get_state(state)
-    config = data.get("reply_keyboard")
-    if not isinstance(config, dict) or config.get("enabled", False) is False:
-        return None
-    wanted = str(label).strip()
-    for row in config.get("rows", []):
-        if not isinstance(row, list):
-            continue
-        for item in row:
-            if isinstance(item, str):
-                if item.strip() == wanted:
-                    return item.strip()
-            elif isinstance(item, dict):
-                rendered = str(render(item.get("text", ""), {})).strip()
-                if rendered == wanted:
-                    return str(item.get("action", "")).strip() or None
-    return None
-
-
 def ui_config() -> dict[str, Any]:
     try:
         return db.reference(UI_ROOT).get() or {}
@@ -363,6 +302,4 @@ class UI:
     text = staticmethod(text)
     keyboard = staticmethod(keyboard)
     button = staticmethod(button)
-    reply_keyboard = staticmethod(reply_keyboard)
-    reply_action = staticmethod(reply_action)
     parse_mode = ParseMode.HTML
