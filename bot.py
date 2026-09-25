@@ -889,161 +889,79 @@ async def admin_detail(query, oid: str) -> None:
 # Orders / support
 # -----------------------------------------------------------------------------
 
-async def get_purchase_for_order(uid: int, oid: str, order: dict[str, Any]) -> Optional[dict[str, Any]]:
-    """Return the purchase belonging to an order, if one exists."""
-    purchase_id_value = str(order.get("purchase_id") or "").strip()
-
-    if purchase_id_value:
-        purchase = await asyncio.to_thread(fb_get, f"purchases/{purchase_id_value}")
-        if purchase and int(purchase.get("telegram_id", 0)) == int(uid):
-            return {"purchase_id": purchase_id_value, **purchase}
-
-    purchases = await asyncio.to_thread(
-        lambda: db.reference("purchases").order_by_child("telegram_id").equal_to(uid).get() or {}
-    )
-
-    for pid, purchase in purchases.items():
-        if str(purchase.get("order_id", "")) == str(oid):
-            return {"purchase_id": pid, **purchase}
-
-    return None
-
-
-def order_is_active_purchase(purchase: Optional[dict[str, Any]]) -> bool:
-    if not purchase:
-        return False
-    return (
-        purchase.get("status") == "active"
-        and int(purchase.get("expires_at", 0)) > now_ms()
-        and bool(purchase.get("encrypted_key"))
-    )
-
-
-def order_status_label(order: dict[str, Any], purchase: Optional[dict[str, Any]]) -> str:
-    if order_is_active_purchase(purchase):
-        return "🟢 ACTIVE"
-
-    if purchase and int(purchase.get("expires_at", 0)) <= now_ms():
-        return "⚪ EXPIRED"
-
-    labels = {
-        "completed": "✅ COMPLETED",
-        "awaiting_verification": "⏳ VERIFYING",
-        "payment_rejected": "❌ REJECTED",
-        "cancelled": "🔴 CANCELLED",
-        "expired": "⚪ EXPIRED",
-    }
-
-    status = str(order.get("status", "unknown"))
-    return labels.get(status, status.upper())
-
-
 async def show_orders(query) -> None:
-    """Display active purchases first, with clickable key recovery buttons."""
-    uid = query.from_user.id
+    """
+    Show the user's active premium purchases.
+
+    This deliberately reads the purchases collection once and filters locally.
+    It avoids Firebase order_by_child/equal_to query issues and uses the
+    purchase record (the source of truth for active premium access).
+    """
+    uid = int(query.from_user.id)
 
     try:
-        # Active purchases are the source of truth for premium access.
-        purchases = await asyncio.to_thread(
-            lambda: db.reference("purchases")
-            .order_by_child("telegram_id")
-            .equal_to(uid)
-            .get() or {}
-        )
+        all_purchases = await asyncio.to_thread(fb_get, "purchases") or {}
 
         active_purchases = []
-        expired_purchases = []
 
-        for pid, purchase in purchases.items():
-            purchase_data = {"purchase_id": pid, **purchase}
+        for pid, purchase in all_purchases.items():
+            try:
+                purchase_uid = int(purchase.get("telegram_id", 0))
+                expires_at = int(purchase.get("expires_at", 0))
+            except (TypeError, ValueError):
+                continue
 
-            if purchase.get("status") == "active":
-                if int(purchase.get("expires_at", 0)) > now_ms():
-                    active_purchases.append(purchase_data)
-                else:
-                    expired_purchases.append(purchase_data)
+            if (
+                purchase_uid == uid
+                and purchase.get("status") == "active"
+                and expires_at > now_ms()
+                and purchase.get("encrypted_key")
+            ):
+                active_purchases.append({
+                    "purchase_id": str(pid),
+                    **purchase,
+                })
 
-        # Newest/longest-valid access first.
         active_purchases.sort(
             key=lambda p: int(p.get("expires_at", 0)),
             reverse=True,
         )
 
         buttons = []
+
         for purchase in active_purchases:
             plan = await asyncio.to_thread(
                 get_plan,
                 purchase.get("product_id", "website"),
                 purchase.get("plan_id", ""),
             )
-            plan_name = (plan or {}).get("name", purchase.get("plan_id", "Premium"))
 
-            # Short callback: safely below Telegram's 64-byte callback_data limit.
+            plan_name = (plan or {}).get(
+                "name",
+                purchase.get("plan_id", "Premium"),
+            )
+
+            # Purchase ID is short and keeps callback_data safely under
+            # Telegram's 64-byte callback-data limit.
             buttons.append([
                 InlineKeyboardButton(
                     f"🟢 {plan_name} · ₹{purchase.get('amount', 0)}",
-                    callback_data=f"order:view:{purchase.get('order_id', '')}",
+                    callback_data=f"purchase:view:{purchase['purchase_id']}",
                     style="success",
                 )
             ])
 
-        text_parts = ["<b>📦 MY ORDERS</b>"]
-
         if active_purchases:
-            text_parts.extend([
-                "",
-                "<b>🟢 ACTIVE PREMIUM</b>",
-                "Tap an active order below to view your key.",
-            ])
+            message = (
+                "<b>📦 MY ORDERS</b>\n\n"
+                "<b>🟢 ACTIVE PREMIUM</b>\n\n"
+                "Tap your active order below to view your premium key."
+            )
         else:
-            text_parts.extend([
-                "",
-                "You have no active premium orders.",
-            ])
-
-        # Keep a compact history section.
-        orders = await asyncio.to_thread(
-            lambda: db.reference("orders")
-            .order_by_child("telegram_id")
-            .equal_to(uid)
-            .get() or {}
-        )
-
-        history = []
-        for oid, order in list(orders.items())[-10:][::-1]:
-            matching_purchase = None
-            for purchase in purchases.values():
-                if str(purchase.get("order_id", "")) == str(oid):
-                    matching_purchase = purchase
-                    break
-
-            # Don't duplicate currently active purchases in history.
-            if matching_purchase and (
-                matching_purchase.get("status") == "active"
-                and int(matching_purchase.get("expires_at", 0)) > now_ms()
-            ):
-                continue
-
-            plan = await asyncio.to_thread(
-                get_plan,
-                order.get("product_id", "website"),
-                order.get("plan_id", ""),
+            message = (
+                "<b>📦 MY ORDERS</b>\n\n"
+                "You currently have no active premium orders."
             )
-            plan_name = (plan or {}).get("name", order.get("plan_id", ""))
-
-            history.append(
-                f"<b>#{html_escape(oid)}</b>\n"
-                f"{html_escape(plan_name)} · ₹{order.get('amount', 0)}\n"
-                f"Status: <b>{html_escape(order_status_label(order, matching_purchase))}</b>"
-            )
-
-        if history:
-            text_parts.extend([
-                "",
-                "<b>📜 ORDER HISTORY</b>",
-                "",
-                "\n\n".join(history),
-            ])
 
         buttons.append([
             InlineKeyboardButton(
@@ -1054,63 +972,95 @@ async def show_orders(query) -> None:
         ])
 
         await query.edit_message_text(
-            "\n".join(text_parts),
+            message,
             parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup(buttons),
         )
 
     except Exception:
-        logger.exception("My Orders failed for Telegram user %s", uid)
+        logger.exception(
+            "My Orders failed for Telegram user %s",
+            uid,
+        )
+
         await query.edit_message_text(
             "<b>⚠️ MY ORDERS</b>\n\n"
-            "I couldn't load your orders right now. Please try again.",
+            "I couldn't load your active orders right now.\n\n"
+            "Please try again.",
             parse_mode=ParseMode.HTML,
             reply_markup=order_back_menu(),
         )
 
 
-async def show_order_detail(query, oid: str) -> None:
-    """Show the customer's active purchase and recover its decrypted key."""
-    uid = query.from_user.id
+async def show_purchase_detail(query, purchase_id_value: str) -> None:
+    """Display and recover the key for one active purchase."""
+    uid = int(query.from_user.id)
 
     try:
-        order = await asyncio.to_thread(fb_get, f"orders/{oid}")
+        purchase = await asyncio.to_thread(
+            fb_get,
+            f"purchases/{purchase_id_value}",
+        )
 
-        # Ownership is mandatory.
-        if not order or int(order.get("telegram_id", 0)) != int(uid):
-            await query.answer("Order not found.", show_alert=True)
+        if not purchase:
+            await query.answer(
+                "Purchase not found.",
+                show_alert=True,
+            )
             return
 
-        purchase = await get_purchase_for_order(uid, oid, order)
+        # Never allow one Telegram user to open another user's purchase.
+        if int(purchase.get("telegram_id", 0)) != uid:
+            await query.answer(
+                "Purchase not found.",
+                show_alert=True,
+            )
+            return
 
-        if not order_is_active_purchase(purchase):
+        expires_at = int(purchase.get("expires_at", 0))
+
+        if (
+            purchase.get("status") != "active"
+            or expires_at <= now_ms()
+            or not purchase.get("encrypted_key")
+        ):
             await query.answer(
                 "This premium order is no longer active.",
                 show_alert=True,
             )
             return
 
-        encrypted_key = purchase.get("encrypted_key")
-        raw_key = decrypt_key(encrypted_key)
+        raw_key = decrypt_key(purchase["encrypted_key"])
 
-        product_id = purchase.get("product_id", order.get("product_id", "website"))
-        plan_id = purchase.get("plan_id", order.get("plan_id", ""))
+        product_id = purchase.get("product_id", "website")
+        plan_id = purchase.get("plan_id", "")
 
-        plan = await asyncio.to_thread(get_plan, product_id, plan_id)
-        product = await asyncio.to_thread(get_product, product_id)
+        plan = await asyncio.to_thread(
+            get_plan,
+            product_id,
+            plan_id,
+        )
 
-        expires_at = int(purchase.get("expires_at", 0))
+        product = await asyncio.to_thread(
+            get_product,
+            product_id,
+        )
+
         expires_text = datetime.fromtimestamp(
             expires_at / 1000,
             timezone.utc,
         ).strftime("%d %b %Y %H:%M UTC")
 
-        destination = product_url(product or {})
         buttons = []
+
+        destination = product_url(product or {})
 
         if destination and "YOUR-WEBSITE-URL" not in destination:
             buttons.append([
-                InlineKeyboardButton("🌐 Open Product", url=destination)
+                InlineKeyboardButton(
+                    "🌐 Open Product",
+                    url=destination,
+                )
             ])
 
         buttons.append([
@@ -1123,32 +1073,44 @@ async def show_order_detail(query, oid: str) -> None:
 
         await query.edit_message_text(
             "<b>🔑 ACTIVE PREMIUM ORDER</b>\n\n"
-            f"Order: <code>{html_escape(oid)}</code>\n"
+            f"Purchase: <code>{html_escape(purchase_id_value)}</code>\n"
+            f"Order: <code>{html_escape(purchase.get('order_id', ''))}</code>\n"
             f"Plan: <b>{html_escape((plan or {}).get('name', plan_id or 'Premium'))}</b>\n"
-            f"Paid: <b>₹{purchase.get('amount', order.get('amount', 0))}</b>\n\n"
-            "<b>Your Premium Key</b>\n"
+            f"Paid: <b>₹{purchase.get('amount', 0)}</b>\n\n"
+            "<b>🔑 Your Premium Key</b>\n\n"
             f"<code>{html_escape(raw_key)}</code>\n\n"
             f"⏰ Expires: <code>{expires_text}</code>\n\n"
-            "You can return to <b>My Orders</b> and open this active order again anytime.",
+            "You can open this order again anytime from "
+            "<b>My Orders</b> while it remains active.",
             parse_mode=ParseMode.HTML,
             reply_markup=InlineKeyboardMarkup(buttons),
         )
 
     except (InvalidToken, TypeError, ValueError):
-        logger.exception("Could not decrypt key for order %s", oid)
+        logger.exception(
+            "Key recovery/decryption failed for purchase %s",
+            purchase_id_value,
+        )
+
         await query.edit_message_text(
             "<b>⚠️ KEY RECOVERY ERROR</b>\n\n"
-            "Your purchase is active, but the key could not be recovered. "
+            "Your premium purchase exists, but the key could not be recovered.\n\n"
             "Please contact support.",
             parse_mode=ParseMode.HTML,
             reply_markup=order_back_menu(),
         )
 
     except Exception:
-        logger.exception("Order detail failed for user %s / order %s", uid, oid)
+        logger.exception(
+            "Purchase detail failed for Telegram user %s / purchase %s",
+            uid,
+            purchase_id_value,
+        )
+
         await query.edit_message_text(
             "<b>⚠️ ORDER ERROR</b>\n\n"
-            "I couldn't open this order right now. Please try again.",
+            "I couldn't open this premium order right now.\n\n"
+            "Please try again.",
             parse_mode=ParseMode.HTML,
             reply_markup=order_back_menu(),
         )
@@ -1252,8 +1214,8 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if data in {"orders", "my_orders"}:
         await show_orders(query)
         return
-    if data.startswith("order:view:"):
-        await show_order_detail(query, data.split(":", 2)[2])
+    if data.startswith("purchase:view:"):
+        await show_purchase_detail(query, data.split(":", 2)[2])
         return
     if data == "support":
         await show_support(query)
