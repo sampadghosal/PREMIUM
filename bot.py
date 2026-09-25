@@ -234,7 +234,7 @@ def main_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🌐 Website Premium", callback_data="product:website", style="success")],
         [
-            InlineKeyboardButton("📦 My Orders", callback_data="orders", style="primary"),
+            InlineKeyboardButton("📦 My Orders", callback_data="my_orders", style="primary"),
             InlineKeyboardButton("📞 Support / Help", callback_data="support", style="primary"),
         ],
     ])
@@ -989,7 +989,7 @@ async def approve_order(query, context: ContextTypes.DEFAULT_TYPE, oid: str) -> 
         buttons = []
         if destination and "YOUR-WEBSITE-URL" not in destination:
             buttons.append([InlineKeyboardButton("🌐 Open Product", url=destination)])
-        buttons.append([InlineKeyboardButton("📦 My Orders", callback_data="orders", style="primary")])
+        buttons.append([InlineKeyboardButton("📦 My Orders", callback_data="my_orders", style="primary")])
 
         await context.bot.send_message(
             chat_id=int(order["telegram_id"]),
@@ -1078,34 +1078,230 @@ async def admin_detail(query, oid: str) -> None:
 # -----------------------------------------------------------------------------
 
 async def show_orders(query) -> None:
-    uid = query.from_user.id
-    orders = await asyncio.to_thread(
-        lambda: db.reference("orders").order_by_child("telegram_id").equal_to(uid).get() or {}
-    )
+    """
+    Show the user's active premium purchases.
 
-    if not orders:
+    This deliberately reads the purchases collection once and filters locally.
+    It avoids Firebase order_by_child/equal_to query issues and uses the
+    purchase record (the source of truth for active premium access).
+    """
+    uid = int(query.from_user.id)
+
+    try:
+        all_purchases = await asyncio.to_thread(fb_get, "purchases") or {}
+
+        active_purchases = []
+
+        for pid, purchase in all_purchases.items():
+            try:
+                purchase_uid = int(purchase.get("telegram_id", 0))
+                expires_at = int(purchase.get("expires_at", 0))
+            except (TypeError, ValueError):
+                continue
+
+            if (
+                purchase_uid == uid
+                and purchase.get("status") == "active"
+                and expires_at > now_ms()
+                and purchase.get("encrypted_key")
+            ):
+                active_purchases.append({
+                    "purchase_id": str(pid),
+                    **purchase,
+                })
+
+        active_purchases.sort(
+            key=lambda p: int(p.get("expires_at", 0)),
+            reverse=True,
+        )
+
+        buttons = []
+
+        for purchase in active_purchases:
+            plan = await asyncio.to_thread(
+                get_plan,
+                purchase.get("product_id", "website"),
+                purchase.get("plan_id", ""),
+            )
+
+            plan_name = (plan or {}).get(
+                "name",
+                purchase.get("plan_id", "Premium"),
+            )
+
+            # Purchase ID is short and keeps callback_data safely under
+            # Telegram's 64-byte callback-data limit.
+            buttons.append([
+                InlineKeyboardButton(
+                    f"🟢 {plan_name} · ₹{purchase.get('amount', 0)}",
+                    callback_data=f"purchase:view:{purchase['purchase_id']}",
+                    style="success",
+                )
+            ])
+
+        if active_purchases:
+            message = (
+                "<b>📦 MY ORDERS</b>\n\n"
+                "<b>🟢 ACTIVE PREMIUM</b>\n\n"
+                "Tap your active order below to view your premium key."
+            )
+        else:
+            message = (
+                "<b>📦 MY ORDERS</b>\n\n"
+                "You currently have no active premium orders."
+            )
+
+        buttons.append([
+            InlineKeyboardButton(
+                "◀️ Back to Main Menu",
+                callback_data="home",
+                style="primary",
+            )
+        ])
+
         await query.edit_message_text(
-            "<b>📦 MY ORDERS</b>\n\nYou don't have any orders yet.",
+            message,
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+
+    except Exception:
+        logger.exception(
+            "My Orders failed for Telegram user %s",
+            uid,
+        )
+
+        await query.edit_message_text(
+            "<b>⚠️ MY ORDERS</b>\n\n"
+            "I couldn't load your active orders right now.\n\n"
+            "Please try again.",
             parse_mode=ParseMode.HTML,
             reply_markup=order_back_menu(),
         )
-        return
 
-    items = []
-    for oid, order in list(orders.items())[-10:][::-1]:
-        plan = await asyncio.to_thread(get_plan, order.get("product_id", "website"), order.get("plan_id", ""))
-        plan_name = (plan or {}).get("name", order.get("plan_id", ""))
-        items.append(
-            f"<b>#{html_escape(oid)}</b>\n"
-            f"{html_escape(plan_name)} · ₹{order.get('amount')}\n"
-            f"Status: <b>{html_escape(order.get('status'))}</b>"
+
+async def show_purchase_detail(query, purchase_id_value: str) -> None:
+    """Display and recover the key for one active purchase."""
+    uid = int(query.from_user.id)
+
+    try:
+        purchase = await asyncio.to_thread(
+            fb_get,
+            f"purchases/{purchase_id_value}",
         )
 
-    await query.edit_message_text(
-        "<b>📦 MY ORDERS</b>\n\n" + "\n\n".join(items),
-        parse_mode=ParseMode.HTML,
-        reply_markup=order_back_menu(),
-    )
+        if not purchase:
+            await query.answer(
+                "Purchase not found.",
+                show_alert=True,
+            )
+            return
+
+        # Never allow one Telegram user to open another user's purchase.
+        if int(purchase.get("telegram_id", 0)) != uid:
+            await query.answer(
+                "Purchase not found.",
+                show_alert=True,
+            )
+            return
+
+        expires_at = int(purchase.get("expires_at", 0))
+
+        if (
+            purchase.get("status") != "active"
+            or expires_at <= now_ms()
+            or not purchase.get("encrypted_key")
+        ):
+            await query.answer(
+                "This premium order is no longer active.",
+                show_alert=True,
+            )
+            return
+
+        raw_key = decrypt_key(purchase["encrypted_key"])
+
+        product_id = purchase.get("product_id", "website")
+        plan_id = purchase.get("plan_id", "")
+
+        plan = await asyncio.to_thread(
+            get_plan,
+            product_id,
+            plan_id,
+        )
+
+        product = await asyncio.to_thread(
+            get_product,
+            product_id,
+        )
+
+        expires_text = datetime.fromtimestamp(
+            expires_at / 1000,
+            timezone.utc,
+        ).strftime("%d %b %Y %H:%M UTC")
+
+        buttons = []
+
+        destination = product_url(product or {})
+
+        if destination and "YOUR-WEBSITE-URL" not in destination:
+            buttons.append([
+                InlineKeyboardButton(
+                    "🌐 Open Product",
+                    url=destination,
+                )
+            ])
+
+        buttons.append([
+            InlineKeyboardButton(
+                "📦 Back to My Orders",
+                callback_data="my_orders",
+                style="primary",
+            )
+        ])
+
+        await query.edit_message_text(
+            "<b>🔑 ACTIVE PREMIUM ORDER</b>\n\n"
+            f"Purchase: <code>{html_escape(purchase_id_value)}</code>\n"
+            f"Order: <code>{html_escape(purchase.get('order_id', ''))}</code>\n"
+            f"Plan: <b>{html_escape((plan or {}).get('name', plan_id or 'Premium'))}</b>\n"
+            f"Paid: <b>₹{purchase.get('amount', 0)}</b>\n\n"
+            "<b>🔑 Your Premium Key</b>\n\n"
+            f"<code>{html_escape(raw_key)}</code>\n\n"
+            f"⏰ Expires: <code>{expires_text}</code>\n\n"
+            "You can open this order again anytime from "
+            "<b>My Orders</b> while it remains active.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=InlineKeyboardMarkup(buttons),
+        )
+
+    except (InvalidToken, TypeError, ValueError):
+        logger.exception(
+            "Key recovery/decryption failed for purchase %s",
+            purchase_id_value,
+        )
+
+        await query.edit_message_text(
+            "<b>⚠️ KEY RECOVERY ERROR</b>\n\n"
+            "Your premium purchase exists, but the key could not be recovered.\n\n"
+            "Please contact support.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=order_back_menu(),
+        )
+
+    except Exception:
+        logger.exception(
+            "Purchase detail failed for Telegram user %s / purchase %s",
+            uid,
+            purchase_id_value,
+        )
+
+        await query.edit_message_text(
+            "<b>⚠️ ORDER ERROR</b>\n\n"
+            "I couldn't open this premium order right now.\n\n"
+            "Please try again.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=order_back_menu(),
+        )
 
 
 async def show_support(query) -> None:
@@ -1160,7 +1356,7 @@ async def resend_key(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     buttons = []
     if destination and "YOUR-WEBSITE-URL" not in destination:
         buttons.append([InlineKeyboardButton("🌐 Open Product", url=destination)])
-    buttons.append([InlineKeyboardButton("📦 My Orders", callback_data="orders", style="primary")])
+    buttons.append([InlineKeyboardButton("📦 My Orders", callback_data="my_orders", style="primary")])
 
     await update.message.reply_text(
         "<b>🔑 YOUR PREMIUM KEY</b>\n\n"
@@ -1203,8 +1399,11 @@ async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if data == "product:website":
         await show_product(query, "website")
         return
-    if data == "orders":
+    if data in {"orders", "my_orders"}:
         await show_orders(query)
+        return
+    if data.startswith("purchase:view:"):
+        await show_purchase_detail(query, data.split(":", 2)[2])
         return
     if data == "support":
         await show_support(query)
@@ -1291,9 +1490,23 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
     logger.exception("Unhandled Telegram error", exc_info=context.error)
 
 
+async def orders_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not update.message:
+        return
+
+    class MessageQueryAdapter:
+        from_user = update.effective_user
+
+        async def edit_message_text(self, *args, **kwargs):
+            return await update.message.reply_text(*args, **kwargs)
+
+    await show_orders(MessageQueryAdapter())
+
+
 def build_application() -> Application:
     application = Application.builder().token(BOT_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("orders", orders_command))
     application.add_handler(CommandHandler("admin", admin_command))
     application.add_handler(CommandHandler("resendkey", resend_key))
     application.add_handler(CallbackQueryHandler(callbacks))
