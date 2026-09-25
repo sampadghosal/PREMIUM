@@ -31,7 +31,7 @@ DEFAULT_UI: dict[str, dict[str, Any]] = {
             "<blockquote>Welcome to the official premium store!\n"
             "Upgrade your membership to get instant access to premium website content and exclusive features.</blockquote>\n\n"
             "💎 <b>Available Premium Services:</b>\n\n"
-            "👑 FabHouse Premium — Premium Website Access\n\n"
+            "👑 <b>FabHouse Premium</b> — Premium Website Access\n\n"
             "<i>Select a service below or use /plans to view complete pricing.</i>\n\n"
             "⚡ Powered by @SILENT_MOD_SG"
         ),
@@ -75,9 +75,15 @@ DEFAULT_UI: dict[str, dict[str, Any]] = {
     "product": {
         "enabled": True,
         "html": (
-            "<b>👑 {{product_name}}</b>\n\n"
-            "{{description}}\n\n"
-            "<b>Choose your plan:</b>"
+            "<b>🔥 FABHOUSE PREMIUM</b>\n\n"
+            "<blockquote>✨ <b>Special Premium Offer!</b> ✨\n"
+            "Get premium website access with instant activation and full access to the available premium features.</blockquote>\n\n"
+            "💎 <b>What You Get:</b>\n\n"
+            "<blockquote>• Premium Website Access\n"
+            "• Individual Premium License Key\n"
+            "• Clean &amp; Ad-Free Experience</blockquote>\n\n"
+            "<i>Select your preferred duration below:</i>\n\n"
+            "⚡ Powered by @SILENT_MOD_SG"
         ),
         "inline_keyboard": {"enabled": True, "rows": []},
     },
