@@ -623,37 +623,66 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
             return
 
-        # Prevent reuse of a UTR already attached to another non-closed order.
-        duplicate = await asyncio.to_thread(
-            lambda: db.reference("orders").order_by_child("utr").equal_to(normalized_utr).get() or {}
-        )
+        # Duplicate-UTR protection must never block a valid submission.
+        # Firebase RTDB queries can fail if an index/query configuration is unavailable.
+        # For this small bot we read the orders collection and treat a lookup failure
+        # as non-fatal; the admin still performs the real payment verification.
+        try:
+            all_orders = await asyncio.to_thread(fb_get, "orders") or {}
+            duplicate = {
+                other_id: other
+                for other_id, other in all_orders.items()
+                if isinstance(other, dict)
+                and other_id != oid
+                and str(other.get("utr", "")).upper() == normalized_utr
+                and other.get("status") not in {"cancelled", "payment_rejected", "expired"}
+            }
+        except Exception:
+            logger.exception("Duplicate UTR lookup failed for order %s; continuing", oid)
+            duplicate = {}
+
         if duplicate:
-            for other_id, other in duplicate.items():
-                if other_id != oid and other.get("status") not in {
-                    "cancelled", "payment_rejected", "expired"
-                }:
-                    await update.message.reply_text(
-                        "⚠️ This UTR has already been submitted for another order.\n"
-                        "Please check the UTR and try again."
-                    )
-                    return
+            await update.message.reply_text(
+                "⚠️ This UTR has already been submitted for another order.\n"
+                "Please check the UTR and try again."
+            )
+            return
 
         timestamp = now_ms()
-        await asyncio.to_thread(
-            fb_update,
-            f"orders/{oid}",
-            {
-                "utr": normalized_utr,
-                "status": "awaiting_verification",
-                "payment_status": "submitted",
-                "utr_submitted_at": timestamp,
-                "updated_at": timestamp,
-            },
-        )
+
+        # Saving the order is the critical operation. Only this failure should
+        # produce a processing error.
+        try:
+            await asyncio.to_thread(
+                fb_update,
+                f"orders/{oid}",
+                {
+                    "utr": normalized_utr,
+                    "status": "awaiting_verification",
+                    "payment_status": "submitted",
+                    "utr_submitted_at": timestamp,
+                    "updated_at": timestamp,
+                },
+            )
+        except Exception:
+            logger.exception("Failed to save UTR for order %s", oid)
+            await update.message.reply_text(
+                "⚠️ I couldn't save the UTR right now. Please try again in a moment."
+            )
+            return
+
         context.user_data.pop("awaiting_utr_order", None)
-        await asyncio.to_thread(
-            fb_update, f"users/{user.id}", {"pending_utr_order": None, "last_seen_at": timestamp}
-        )
+
+        # Clearing the Firebase pending marker is cleanup only. It must not make
+        # an already-saved UTR look like it failed.
+        try:
+            await asyncio.to_thread(
+                fb_update,
+                f"users/{user.id}",
+                {"pending_utr_order": None, "last_seen_at": timestamp},
+            )
+        except Exception:
+            logger.exception("Failed to clear pending UTR marker for user %s", user.id)
 
         await update.message.reply_text(
             "<b>✅ UTR SUBMITTED</b>\n\n"
