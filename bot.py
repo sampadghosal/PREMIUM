@@ -74,7 +74,7 @@ except Exception as exc:
     raise RuntimeError("KEY_ENCRYPTION_KEY must be a valid Fernet key") from exc
 
 
-from UI import UI, state_text, keyboard as ui_keyboard, dynamic_button as ui_button, render as ui_render
+from UI import UI, reply_action as ui_reply_action, render as ui_render
 
 # -----------------------------------------------------------------------------
 # Firebase
@@ -345,6 +345,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         parse_mode=ParseMode.HTML,
         reply_markup=UI.keyboard("welcome"),
     )
+    reply_markup = UI.reply_keyboard("welcome")
+    if reply_markup:
+        await update.message.reply_text(
+            UI.text("welcome", field="reply_prompt"),
+            reply_markup=reply_markup,
+        )
 
 
 async def show_home(query) -> None:
@@ -617,7 +623,12 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             return
 
     if not oid:
-        # Ordinary message; this user is not currently submitting a UTR.
+        # Persistent reply-keyboard messages arrive as ordinary text.
+        # Firebase selects the trusted action; the engine executes it.
+        action = ui_reply_action(message.text, "welcome")
+        if action:
+            adapter = MessageQueryAdapter(message, user)
+            await dispatch_action(adapter, context, action, user)
         return
 
     oid = str(oid)
@@ -1351,6 +1362,54 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await send_admin_review(update, oid)
 
 
+
+class MessageQueryAdapter:
+    """Adapter so trusted Firebase reply-keyboard actions use the same engine."""
+    def __init__(self, message, user):
+        self.message = message
+        self.from_user = user
+
+    async def edit_message_text(self, text, **kwargs):
+        return await self.message.reply_text(text, **kwargs)
+
+    async def answer(self, *args, **kwargs):
+        return None
+
+
+async def dispatch_action(query, context: ContextTypes.DEFAULT_TYPE, data: str, user) -> None:
+    """Execute only known/trusted action strings selected by Firebase UI."""
+    data = str(data or "")
+    if data == "home":
+        await show_home(query); return
+    if data == "product:website":
+        await show_product(query, "website"); return
+    if data in {"orders", "my_orders"}:
+        await show_orders(query); return
+    if data == "support":
+        await show_support(query); return
+    if data == "help":
+        await show_support(query); return
+    if data.startswith("purchase:view:"):
+        await show_purchase_detail(query, data.split(":", 2)[2]); return
+    if data.startswith("plan:website:"):
+        await create_order(query, user, "website", data.split(":", 2)[2]); return
+    if data.startswith("manual:"):
+        await send_manual_upi(query, context, data.split(":", 1)[1]); return
+    if data.startswith("cancel:"):
+        await cancel_order(query, data.split(":", 1)[1]); return
+    if data.startswith("utr:"):
+        await request_utr(query, context, data.split(":", 1)[1]); return
+    if data.startswith("planback:"):
+        await show_product(query, "website"); return
+    if data.startswith("adminapprove:"):
+        await approve_order(query, context, data.split(":", 1)[1]); return
+    if data.startswith("adminreject:"):
+        await reject_order(query, data.split(":", 1)[1]); return
+    if data.startswith("admindetail:"):
+        await admin_detail(query, data.split(":", 1)[1]); return
+    logger.warning("Ignoring unknown UI action: %s", data)
+
+
 # -----------------------------------------------------------------------------
 # Callback router
 # -----------------------------------------------------------------------------
@@ -1358,57 +1417,7 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
 async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
-    data = query.data or ""
-    user = query.from_user
-
-    if data == "home":
-        await show_home(query)
-        return
-    if data == "product:website":
-        await show_product(query, "website")
-        return
-    if data in {"orders", "my_orders"}:
-        await show_orders(query)
-        return
-    if data.startswith("purchase:view:"):
-        await show_purchase_detail(query, data.split(":", 2)[2])
-        return
-    if data == "support":
-        await show_support(query)
-        return
-
-    if data.startswith("plan:website:"):
-        plan_id = data.split(":", 2)[2]
-        await create_order(query, user, "website", plan_id)
-        return
-
-    if data.startswith("manual:"):
-        await send_manual_upi(query, context, data.split(":", 1)[1])
-        return
-
-    if data.startswith("cancel:"):
-        await cancel_order(query, data.split(":", 1)[1])
-        return
-
-    if data.startswith("utr:"):
-        await request_utr(query, context, data.split(":", 1)[1])
-        return
-
-    if data.startswith("adminapprove:"):
-        await approve_order(query, context, data.split(":", 1)[1])
-        return
-
-    if data.startswith("adminreject:"):
-        await reject_order(query, data.split(":", 1)[1])
-        return
-
-    if data.startswith("admindetail:"):
-        await admin_detail(query, data.split(":", 1)[1])
-        return
-
-    if data.startswith("planback:"):
-        await show_product(query, "website")
-        return
+    await dispatch_action(query, context, query.data or "", query.from_user)
 
 
 # -----------------------------------------------------------------------------
@@ -1462,13 +1471,7 @@ async def orders_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     if not update.message:
         return
 
-    class MessageQueryAdapter:
-        from_user = update.effective_user
-
-        async def edit_message_text(self, *args, **kwargs):
-            return await update.message.reply_text(*args, **kwargs)
-
-    await show_orders(MessageQueryAdapter())
+    await show_orders(MessageQueryAdapter(update.message, update.effective_user))
 
 
 def build_application() -> Application:
