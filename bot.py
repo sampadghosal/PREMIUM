@@ -623,17 +623,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
             return
 
-        # Prevent reuse of a UTR already attached to another order.
-        # Do this defensively: a database query/index problem must NEVER make a
-        # valid UTR submission fail with the generic "couldn't process" message.
-        try:
-            duplicate = await asyncio.to_thread(
-                lambda: db.reference("orders").order_by_child("utr").equal_to(normalized_utr).get() or {}
-            )
-        except Exception:
-            logger.exception("Duplicate-UTR lookup failed for %s; continuing with submission", oid)
-            duplicate = {}
-
+        # Prevent reuse of a UTR already attached to another non-closed order.
+        duplicate = await asyncio.to_thread(
+            lambda: db.reference("orders").order_by_child("utr").equal_to(normalized_utr).get() or {}
+        )
         if duplicate:
             for other_id, other in duplicate.items():
                 if other_id != oid and other.get("status") not in {
@@ -646,24 +639,17 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
                     return
 
         timestamp = now_ms()
-        try:
-            await asyncio.to_thread(
-                fb_update,
-                f"orders/{oid}",
-                {
-                    "utr": normalized_utr,
-                    "status": "awaiting_verification",
-                    "payment_status": "submitted",
-                    "utr_submitted_at": timestamp,
-                    "updated_at": timestamp,
-                },
-            )
-        except Exception:
-            logger.exception("Failed to save UTR for order %s", oid)
-            await update.message.reply_text(
-                "⚠️ I couldn't save the UTR right now. Please try again in a moment."
-            )
-            return
+        await asyncio.to_thread(
+            fb_update,
+            f"orders/{oid}",
+            {
+                "utr": normalized_utr,
+                "status": "awaiting_verification",
+                "payment_status": "submitted",
+                "utr_submitted_at": timestamp,
+                "updated_at": timestamp,
+            },
+        )
         context.user_data.pop("awaiting_utr_order", None)
         await asyncio.to_thread(
             fb_update, f"users/{user.id}", {"pending_utr_order": None, "last_seen_at": timestamp}
@@ -813,15 +799,24 @@ async def approve_order(query, context: ContextTypes.DEFAULT_TYPE, oid: str) -> 
     try:
         destination = product_url(product)
         buttons = []
+        product_line = ""
         if destination and "YOUR-WEBSITE-URL" not in destination:
+            # product_url is intentionally read from products/<product_id> in Firebase.
+            # Never hard-code a website URL into the bot.
+            product_line = f"\n🌐 <a href=\"{html_escape(destination)}\">Open Product</a>\n"
             buttons.append([InlineKeyboardButton("🌐 Open Product", url=destination)])
+        else:
+            logger.warning("No valid product_url configured for product %s", product_id)
+            product_line = "\n⚠️ Product URL is not configured yet.\n"
+
         buttons.append([InlineKeyboardButton("📦 My Orders", callback_data="orders", style="primary")])
 
         await context.bot.send_message(
             chat_id=int(order["telegram_id"]),
             text=(
                 "<b>🎉 PAYMENT APPROVED</b>\n\n"
-                "Your premium access is now active.\n\n"
+                "Your premium access is now active.\n"
+                f"{product_line}\n"
                 f"📦 Plan: {html_escape(plan.get('name', plan_id))}\n"
                 f"💰 Paid: ₹{order.get('amount')}\n\n"
                 f"🔑 <b>Your Premium Key</b>\n\n"
@@ -904,10 +899,30 @@ async def admin_detail(query, oid: str) -> None:
 # -----------------------------------------------------------------------------
 
 async def show_orders(query) -> None:
+    """Show the current user's orders without relying on an RTDB query index.
+
+    The previous implementation used order_by_child("telegram_id").equal_to(...).
+    If that query fails, the callback handler has no visible response. For this bot's
+    expected order volume, reading the orders collection and filtering locally is
+    more robust and still keeps the operation server-side through the Admin SDK.
+    """
     uid = query.from_user.id
-    orders = await asyncio.to_thread(
-        lambda: db.reference("orders").order_by_child("telegram_id").equal_to(uid).get() or {}
-    )
+
+    try:
+        all_orders = await asyncio.to_thread(fb_get, "orders") or {}
+        orders = {
+            oid: order
+            for oid, order in all_orders.items()
+            if isinstance(order, dict) and str(order.get("telegram_id")) == str(uid)
+        }
+    except Exception:
+        logger.exception("Failed to load orders for Telegram user %s", uid)
+        await query.edit_message_text(
+            "<b>📦 MY ORDERS</b>\n\n⚠️ I couldn't load your orders right now. Please try again.",
+            parse_mode=ParseMode.HTML,
+            reply_markup=order_back_menu(),
+        )
+        return
 
     if not orders:
         await query.edit_message_text(
@@ -918,19 +933,38 @@ async def show_orders(query) -> None:
         return
 
     items = []
+    buttons = []
+    # Firebase push IDs are chronological, so reverse the collection order and
+    # show the newest 10 orders.
     for oid, order in list(orders.items())[-10:][::-1]:
-        plan = await asyncio.to_thread(get_plan, order.get("product_id", "website"), order.get("plan_id", ""))
+        plan = await asyncio.to_thread(
+            get_plan, order.get("product_id", "website"), order.get("plan_id", "")
+        )
+        product = await asyncio.to_thread(get_product, order.get("product_id", "website"))
         plan_name = (plan or {}).get("name", order.get("plan_id", ""))
+        product_name = (product or {}).get("name", order.get("product_id", "website"))
+        status = str(order.get("status", "unknown")).replace("_", " ").title()
+
         items.append(
             f"<b>#{html_escape(oid)}</b>\n"
-            f"{html_escape(plan_name)} · ₹{order.get('amount')}\n"
-            f"Status: <b>{html_escape(order.get('status'))}</b>"
+            f"🌐 {html_escape(product_name)}\n"
+            f"📦 {html_escape(plan_name)} · ₹{order.get('amount')}\n"
+            f"Status: <b>{html_escape(status)}</b>"
         )
+
+        if status.lower() == "completed":
+            destination = product_url(product or {})
+            if destination and "YOUR-WEBSITE-URL" not in destination:
+                buttons.append([InlineKeyboardButton(
+                    f"🌐 Open {product_name}", url=destination
+                )])
+
+    buttons.append([InlineKeyboardButton("◀️ Back to Main Menu", callback_data="home", style="primary")])
 
     await query.edit_message_text(
         "<b>📦 MY ORDERS</b>\n\n" + "\n\n".join(items),
         parse_mode=ParseMode.HTML,
-        reply_markup=order_back_menu(),
+        reply_markup=InlineKeyboardMarkup(buttons),
     )
 
 
