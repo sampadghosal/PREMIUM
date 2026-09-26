@@ -39,12 +39,29 @@ DEFAULT_UI: dict[str, dict[str, Any]] = {
             "enabled": True,
             "rows": [
                 [{"text": "👑 FabHouse Premium", "action": "product:website", "style": "success"}],
+                [{"text": "🆓 Free 1 Hour Access", "action": "free:claim", "style": "primary"}],
                 [
                     {"text": "📦 My Orders", "action": "orders", "style": "primary"},
                     {"text": "📞 Support / Help", "action": "support", "style": "primary"},
                 ],
             ],
         },
+    },
+    "free_access": {
+        "enabled": True,
+        "created": "<b>🆓 FREE 1 HOUR ACCESS</b>\n\nYour verification link is ready.\n\nTap <b>VERIFY &amp; CONTINUE</b> to begin the shortlink verification process.",
+        "success": "<b>🎉 FREE ACCESS ACTIVATED</b>\n\n🔑 <b>Your 1-Hour Premium Key</b>\n\n<code>{{key}}</code>\n\n⏰ Expires: <code>{{expires_at}}</code>\n\nUse this key on the premium website.",
+        "invalid": "<b>⚠️ INVALID CLAIM</b>\n\nThis verification link is invalid.",
+        "expired": "<b>⏰ CLAIM EXPIRED</b>\n\nThis free verification request has expired. Please create a new one.",
+        "already_used": "<b>⚠️ CLAIM ALREADY USED</b>\n\nThis verification request has already been completed.",
+        "error": "<b>⚠️ VERIFICATION ERROR</b>\n\nSomething went wrong while activating your free access. Please try again later.",
+        "inline_keyboard": {
+            "enabled": True,
+            "rows": [
+                [{"text": "🔐 VERIFY &amp; CONTINUE", "url": "{{verify_url}}", "style": "success"}],
+                [{"text": "🏠 Main Menu", "action": "home", "style": "primary"}]
+            ]
+        }
     },
     "help": {
         "enabled": True,
