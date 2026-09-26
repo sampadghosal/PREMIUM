@@ -16,6 +16,7 @@ jobs:
   bot:
     runs-on: ubuntu-latest
     timeout-minutes: 330
+
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -31,16 +32,24 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Syntax Check
-        run: python -m py_compile bot.py
-
       - name: Run Bot
         env:
+          # Telegram
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           ADMIN_ID: ${{ secrets.ADMIN_ID }}
+
+          # Firebase
           FIREBASE_PROJECT_ID: ${{ secrets.FIREBASE_PROJECT_ID }}
           FIREBASE_CLIENT_EMAIL: ${{ secrets.FIREBASE_CLIENT_EMAIL }}
           FIREBASE_PRIVATE_KEY: ${{ secrets.FIREBASE_PRIVATE_KEY }}
           FIREBASE_DATABASE_URL: ${{ secrets.FIREBASE_DATABASE_URL }}
           KEY_ENCRYPTION_KEY: ${{ secrets.KEY_ENCRYPTION_KEY }}
-        run: python bot.py
+
+          # VPLINK / Free Access
+          VPLINK_API_TOKEN: ${{ secrets.VPLINK_API_TOKEN }}
+          VPLINK_API_URL: ${{ secrets.VPLINK_API_URL }}
+          FREE_VERIFY_URL: ${{ secrets.FREE_VERIFY_URL }}
+          FREE_CLAIM_TTL_SECONDS: ${{ secrets.FREE_CLAIM_TTL_SECONDS }}
+
+        run: |
+          python -u bot.py
