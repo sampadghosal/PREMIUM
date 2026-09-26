@@ -46,22 +46,6 @@ DEFAULT_UI: dict[str, dict[str, Any]] = {
             ],
         },
     },
-    "free_access": {
-        "enabled": True,
-        "created": "<b>🆓 FREE 1 HOUR ACCESS</b>\n\nYour verification link is ready.\n\nTap <b>VERIFY &amp; CONTINUE</b> to begin the shortlink verification process.",
-        "success": "<b>🎉 FREE ACCESS ACTIVATED</b>\n\n🔑 <b>Your 1-Hour Premium Key</b>\n\n<code>{{key}}</code>\n\n⏰ Expires: <code>{{expires_at}}</code>\n\nUse this key on the premium website.",
-        "invalid": "<b>⚠️ INVALID CLAIM</b>\n\nThis verification link is invalid.",
-        "expired": "<b>⏰ CLAIM EXPIRED</b>\n\nThis free verification request has expired. Please create a new one.",
-        "already_used": "<b>⚠️ CLAIM ALREADY USED</b>\n\nThis verification request has already been completed.",
-        "error": "<b>⚠️ VERIFICATION ERROR</b>\n\nSomething went wrong while activating your free access. Please try again later.",
-        "inline_keyboard": {
-            "enabled": True,
-            "rows": [
-                [{"text": "🔐 VERIFY &amp; CONTINUE", "url": "{{verify_url}}", "style": "success"}],
-                [{"text": "🏠 Main Menu", "action": "home", "style": "primary"}]
-            ]
-        }
-    },
     "help": {
         "enabled": True,
         "html": (
@@ -118,6 +102,7 @@ DEFAULT_UI: dict[str, dict[str, Any]] = {
         ),
         "plan_button": "👑 {{plan_name}} (₹{{price}})",
         "plan_style": "success",
+        "admin_free_button": {"text": "🆓 Free 1 Hour Access", "action": "free:claim", "style": "primary"},
         "back_button": "◀️ Back to Main Menu",
         "back_action": "home",
         "inline_keyboard": {"enabled": True, "rows": []},
@@ -131,7 +116,6 @@ DEFAULT_UI: dict[str, dict[str, Any]] = {
             "⚡ Delivery: Instant Activation</blockquote>\n\n"
             "<b>💳 Choose Your Payment Method:</b>"
         ),
-        "admin_free_button": {"text": "🆓 Free 1 Hour Access", "action": "free:claim", "style": "primary"},
         "inline_keyboard": {
             "enabled": True,
             "rows": [
@@ -359,7 +343,7 @@ def _inline_rows(data: dict[str, Any]) -> list[list[dict[str, Any]]]:
     return rows if isinstance(rows, list) else []
 
 
-def keyboard(state: str, values: Optional[dict[str, Any]] = None, extra_rows: Optional[list[list[InlineKeyboardButton]]] = None, admin_mode: bool = False) -> InlineKeyboardMarkup:
+def keyboard(state: str, values: Optional[dict[str, Any]] = None, extra_rows: Optional[list[list[InlineKeyboardButton]]] = None) -> InlineKeyboardMarkup:
     values = values or {}
     data = get_state(state)
     inline = data.get("inline_keyboard", {})
@@ -379,16 +363,6 @@ def keyboard(state: str, values: Optional[dict[str, Any]] = None, extra_rows: Op
             if built:
                 rows.append(built)
 
-    # Free access is shown only inside the selected product's
-    # payment-method screen during the current admin-only test.
-    # It is never added to the main menu.
-    if admin_mode and state == "payment_methods":
-        admin_button = data.get("admin_free_button")
-        if isinstance(admin_button, dict):
-            btn = _button(admin_button, values)
-            if btn:
-                rows.insert(0, [btn])
-
     if extra_rows:
         rows.extend(extra_rows)
     return InlineKeyboardMarkup(rows)
@@ -404,7 +378,7 @@ def button(state: str, field: str, values: dict[str, Any], callback_data: str, s
     return InlineKeyboardButton(**kwargs)
 
 
-def plans_keyboard(product: dict[str, Any]) -> InlineKeyboardMarkup:
+def plans_keyboard(product: dict[str, Any], admin_mode: bool = False) -> InlineKeyboardMarkup:
     """Build exactly ONE plan keyboard from Firebase UI + product plans."""
     state = get_state("plans")
     plan_template = state.get("plan_button", "👑 {{plan_name}} (₹{{price}})")
@@ -428,6 +402,15 @@ def plans_keyboard(product: dict[str, Any]) -> InlineKeyboardMarkup:
         if plan_style in {"primary", "success", "danger"}:
             kwargs["style"] = plan_style
         rows.append([InlineKeyboardButton(**kwargs)])
+
+    # During the current test phase, only ADMIN_ID sees Free 1 Hour Access.
+    # It is shown on the product's plan-selection screen, never on the main menu.
+    if admin_mode:
+        admin_button = state.get("admin_free_button")
+        if isinstance(admin_button, dict):
+            btn = _button(admin_button, {})
+            if btn:
+                rows.append([btn])
 
     back_text = str(render(state.get("back_button", "◀️ Back to Main Menu"), {}))
     back_action = str(render(state.get("back_action", "home"), {}))
