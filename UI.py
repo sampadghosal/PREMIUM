@@ -35,7 +35,6 @@ DEFAULT_UI: dict[str, dict[str, Any]] = {
             "<i>Select a service below or use /plans to view complete pricing.</i>\n\n"
             "⚡ Powered by @SILENT_MOD_SG"
         ),
-        "admin_free_button": {"text": "🆓 Free 1 Hour Access", "action": "free:claim", "style": "primary"},
         "inline_keyboard": {
             "enabled": True,
             "rows": [
@@ -132,6 +131,7 @@ DEFAULT_UI: dict[str, dict[str, Any]] = {
             "⚡ Delivery: Instant Activation</blockquote>\n\n"
             "<b>💳 Choose Your Payment Method:</b>"
         ),
+        "admin_free_button": {"text": "🆓 Free 1 Hour Access", "action": "free:claim", "style": "primary"},
         "inline_keyboard": {
             "enabled": True,
             "rows": [
@@ -379,12 +379,15 @@ def keyboard(state: str, values: Optional[dict[str, Any]] = None, extra_rows: Op
             if built:
                 rows.append(built)
 
-    if admin_mode and state == "welcome":
+    # Free access is shown only inside the selected product's
+    # payment-method screen during the current admin-only test.
+    # It is never added to the main menu.
+    if admin_mode and state == "payment_methods":
         admin_button = data.get("admin_free_button")
         if isinstance(admin_button, dict):
             btn = _button(admin_button, values)
             if btn:
-                rows.insert(1, [btn])
+                rows.insert(0, [btn])
 
     if extra_rows:
         rows.extend(extra_rows)

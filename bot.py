@@ -361,8 +361,12 @@ def main_menu(user_id: int):
 def plans_menu(product: dict[str, Any]):
     return UI.plans_keyboard(product)
 
-def payment_method_menu(order: str):
-    return UI.keyboard("payment_methods", {"order_id": order, "product_id": "website"})
+def payment_method_menu(order: str, user_id: int):
+    return UI.keyboard(
+        "payment_methods",
+        {"order_id": order, "product_id": "website"},
+        admin_mode=is_admin(user_id),
+    )
 
 def payment_action_menu(order: str):
     return UI.keyboard("payment_pending", {"order_id": order})
@@ -616,7 +620,7 @@ async def create_order(query, user, product_id: str, plan_id: str) -> None:
             "product_id": product_id,
         }),
         parse_mode=ParseMode.HTML,
-        reply_markup=payment_method_menu(oid),
+        reply_markup=payment_method_menu(oid, user.id),
     )
 
 
