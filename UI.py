@@ -35,11 +35,11 @@ DEFAULT_UI: dict[str, dict[str, Any]] = {
             "<i>Select a service below or use /plans to view complete pricing.</i>\n\n"
             "⚡ Powered by @SILENT_MOD_SG"
         ),
+        "admin_free_button": {"text": "🆓 Free 1 Hour Access", "action": "free:claim", "style": "primary"},
         "inline_keyboard": {
             "enabled": True,
             "rows": [
                 [{"text": "👑 FabHouse Premium", "action": "product:website", "style": "success"}],
-                [{"text": "🆓 Free 1 Hour Access", "action": "free:claim", "style": "primary"}],
                 [
                     {"text": "📦 My Orders", "action": "orders", "style": "primary"},
                     {"text": "📞 Support / Help", "action": "support", "style": "primary"},
@@ -359,7 +359,7 @@ def _inline_rows(data: dict[str, Any]) -> list[list[dict[str, Any]]]:
     return rows if isinstance(rows, list) else []
 
 
-def keyboard(state: str, values: Optional[dict[str, Any]] = None, extra_rows: Optional[list[list[InlineKeyboardButton]]] = None) -> InlineKeyboardMarkup:
+def keyboard(state: str, values: Optional[dict[str, Any]] = None, extra_rows: Optional[list[list[InlineKeyboardButton]]] = None, admin_mode: bool = False) -> InlineKeyboardMarkup:
     values = values or {}
     data = get_state(state)
     inline = data.get("inline_keyboard", {})
@@ -378,6 +378,13 @@ def keyboard(state: str, values: Optional[dict[str, Any]] = None, extra_rows: Op
                         built.append(btn)
             if built:
                 rows.append(built)
+
+    if admin_mode and state == "welcome":
+        admin_button = data.get("admin_free_button")
+        if isinstance(admin_button, dict):
+            btn = _button(admin_button, values)
+            if btn:
+                rows.insert(1, [btn])
 
     if extra_rows:
         rows.extend(extra_rows)
