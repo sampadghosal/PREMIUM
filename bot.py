@@ -322,9 +322,7 @@ def consume_free_claim(
 
 
 async def create_free_claim(user) -> str:
-    # TEMPORARY TEST MODE: free access is restricted to the configured admin.
-    if not is_admin(user.id):
-        raise PermissionError("Free access is currently restricted to the admin.")
+    # Public free-access flow: any Telegram user may create a claim.
     claim = free_claim_id()
     claim_hash = free_claim_hash(claim)
     created = now_ms()
@@ -394,15 +392,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         payload = str(context.args[0]).strip()
 
     if payload.startswith("free_"):
-        # TEMPORARY TEST MODE: free access is available only to ADMIN_ID.
-        if not is_admin(user.id):
-            await update.message.reply_text(
-                UI.text("welcome"),
-                parse_mode=ParseMode.HTML,
-                reply_markup=UI.keyboard("welcome", admin_mode=False),
-            )
-            return
-
+        # Public free-access redemption: the claim itself is bound to the
+        # Telegram user who created it, so anyone can use their own claim.
         claim = payload[5:]
         if not claim or len(claim) > 128:
             await update.message.reply_text(UI.text("free_access", field="invalid"), parse_mode=ParseMode.HTML)
@@ -1437,10 +1428,6 @@ async def dispatch_action(query, context: ContextTypes.DEFAULT_TYPE, data: str, 
     if data == "product:website":
         await show_product(query, "website"); return
     if data == "free:claim":
-        # TEMPORARY TEST MODE: only the configured admin can create free claims.
-        if not is_admin(user.id):
-            await query.answer("Admin-only test access.", show_alert=True)
-            return
         try:
             verify_url = await create_free_claim(user)
             await query.message.reply_text(

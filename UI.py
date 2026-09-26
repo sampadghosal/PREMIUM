@@ -419,14 +419,13 @@ def plans_keyboard(product: dict[str, Any], admin_mode: bool = False) -> InlineK
             kwargs["style"] = plan_style
         rows.append([InlineKeyboardButton(**kwargs)])
 
-    # Free access is currently a test feature for ADMIN_ID only.
-    # It belongs on the product/plan-selection screen, not the main menu.
-    if admin_mode:
-        admin_button = state.get("admin_free_button")
-        if isinstance(admin_button, dict):
-            btn = _button(admin_button, {})
-            if btn:
-                rows.append([btn])
+    # Public free access is shown on the product/plan-selection screen.
+    # It is never shown on the main menu.
+    free_button = state.get("admin_free_button")
+    if isinstance(free_button, dict):
+        btn = _button(free_button, {})
+        if btn:
+            rows.append([btn])
 
     back_text = str(render(state.get("back_button", "◀️ Back to Main Menu"), {}))
     back_action = str(render(state.get("back_action", "home"), {}))
