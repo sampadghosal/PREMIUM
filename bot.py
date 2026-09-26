@@ -8,6 +8,8 @@ import secrets
 import string
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 import qrcode
 import firebase_admin
@@ -67,6 +69,18 @@ KEY_ENCRYPTION_KEY = os.environ.get("KEY_ENCRYPTION_KEY", "").strip()
 
 if not KEY_ENCRYPTION_KEY:
     raise RuntimeError("KEY_ENCRYPTION_KEY is missing")
+
+VPLINK_API_URL = os.environ.get("VPLINK_API_URL", "https://vplink.in/api").strip()
+VPLINK_API_TOKEN = os.environ.get("VPLINK_API_TOKEN", "").strip()
+FREE_VERIFY_URL = os.environ.get("FREE_VERIFY_URL", "").strip().rstrip("/")
+FREE_CLAIM_TTL_SECONDS = int(os.environ.get("FREE_CLAIM_TTL_SECONDS", "600"))
+
+if not VPLINK_API_TOKEN:
+    raise RuntimeError("VPLINK_API_TOKEN is missing")
+if not FREE_VERIFY_URL:
+    raise RuntimeError("FREE_VERIFY_URL is missing")
+if FREE_CLAIM_TTL_SECONDS < 60:
+    raise RuntimeError("FREE_CLAIM_TTL_SECONDS must be at least 60")
 
 try:
     FERNET = Fernet(KEY_ENCRYPTION_KEY.encode("utf-8"))
@@ -228,14 +242,121 @@ def product_url(product: dict[str, Any]) -> str:
     return str(product.get("product_url", "")).strip()
 
 
+def free_claim_id() -> str:
+    return secrets.token_urlsafe(32)
+
+
+def free_claim_hash(claim: str) -> str:
+    return hashlib.sha256(claim.encode("utf-8")).hexdigest()
+
+
+def build_vplink_url(destination: str) -> str:
+    params = {
+        "api": VPLINK_API_TOKEN,
+        "url": destination,
+    }
+    request_url = f"{VPLINK_API_URL}?{urlencode(params)}"
+    request = Request(request_url, headers={"User-Agent": "SILENT-PREMIUM-BOT/1.0"})
+    with urlopen(request, timeout=20) as response:
+        body = response.read().decode("utf-8", errors="replace")
+    data = json.loads(body)
+    if str(data.get("status", "")).lower() != "success":
+        raise RuntimeError(str(data.get("message", "VPLINK returned an error")))
+    short_url = str(data.get("shortenedUrl", "")).strip()
+    if not short_url.startswith(("https://", "http://")):
+        raise RuntimeError("VPLINK returned an invalid shortenedUrl")
+    return short_url
+
+
+def consume_free_claim(
+    claim_hash: str,
+    telegram_id: int,
+    candidate_purchase_id: str,
+    candidate_key_hash: str,
+    candidate_encrypted_key: str,
+    candidate_expires_at: int,
+) -> tuple[bool, Optional[dict[str, Any]], str]:
+    path = f"free_claims/{claim_hash}"
+    ref = db.reference(path)
+    now = now_ms()
+
+    def transaction(current):
+        if not isinstance(current, dict):
+            return current
+        if str(current.get("telegram_id")) != str(telegram_id):
+            return current
+        status = current.get("status")
+        if status == "used":
+            # A previous attempt already reserved the one-hour key. Returning
+            # the same issuance data makes delivery recoverable if a later
+            # Firebase write or Telegram send failed.
+            return current
+        if status != "pending":
+            return current
+        try:
+            if int(current.get("expires_at", 0)) <= now:
+                current["status"] = "expired"
+                current["expired_at"] = now
+                return current
+        except (TypeError, ValueError):
+            return current
+
+        current["status"] = "used"
+        current["used_at"] = now
+        current["issued_purchase_id"] = candidate_purchase_id
+        current["issued_key_hash"] = candidate_key_hash
+        current["issued_encrypted_key"] = candidate_encrypted_key
+        current["issued_expires_at"] = candidate_expires_at
+        return current
+
+    result = ref.transaction(transaction)
+    if not isinstance(result, dict):
+        return False, None, "invalid"
+    if str(result.get("telegram_id")) != str(telegram_id):
+        return False, result, "owner_mismatch"
+    if result.get("status") == "expired":
+        return False, result, "expired"
+    if result.get("status") == "used" and result.get("issued_key_hash"):
+        return True, result, "ok"
+    return False, result, "invalid"
+
+
+async def create_free_claim(user) -> str:
+    # TEMPORARY TEST MODE: free access is restricted to the configured admin.
+    if not is_admin(user.id):
+        raise PermissionError("Free access is currently restricted to the admin.")
+    claim = free_claim_id()
+    claim_hash = free_claim_hash(claim)
+    created = now_ms()
+    expires = created + FREE_CLAIM_TTL_SECONDS * 1000
+    verify_url = f"{FREE_VERIFY_URL}?{urlencode({'claim': claim})}"
+    completion_url = f"{FREE_VERIFY_URL.rsplit('/', 1)[0]}/complete.php?{urlencode({'claim': claim})}"
+
+    # Generate the VPLINK URL server-side. The user receives only verify_url.
+    short_url = await asyncio.to_thread(build_vplink_url, completion_url)
+    record = {
+        "telegram_id": user.id,
+        "claim_hash": claim_hash,
+        "status": "pending",
+        "created_at": created,
+        "expires_at": expires,
+        "verify_url": verify_url,
+        "short_url": short_url,
+        "completion_url": completion_url,
+        "access_type": "free_shortlink",
+    }
+    await asyncio.to_thread(fb_set, f"free_claims/{claim_hash}", record)
+    return verify_url
+
+
 # -----------------------------------------------------------------------------
 # UI helpers
 # -----------------------------------------------------------------------------
 # IMPORTANT: UI.py is the single customer-facing UI engine.
 # Do not create Telegram keyboards directly in bot.py.
 
-def main_menu():
-    return UI.keyboard("welcome")
+def main_menu(user_id: int):
+    return UI.keyboard("welcome", admin_mode=is_admin(user_id))
 
 def plans_menu(product: dict[str, Any], user_id: int):
     return UI.plans_keyboard(product, admin_mode=is_admin(user_id))
@@ -267,10 +388,111 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not user or not update.message:
         return
     await asyncio.to_thread(ensure_user, user)
+
+    payload = ""
+    if context.args:
+        payload = str(context.args[0]).strip()
+
+    if payload.startswith("free_"):
+        # TEMPORARY TEST MODE: free access is available only to ADMIN_ID.
+        if not is_admin(user.id):
+            await update.message.reply_text(
+                UI.text("welcome"),
+                parse_mode=ParseMode.HTML,
+                reply_markup=UI.keyboard("welcome", admin_mode=False),
+            )
+            return
+
+        claim = payload[5:]
+        if not claim or len(claim) > 128:
+            await update.message.reply_text(UI.text("free_access", field="invalid"), parse_mode=ParseMode.HTML)
+            return
+
+        claim_hash = free_claim_hash(claim)
+
+        issued_at = now_ms()
+        expires_at = issued_at + 60 * 60 * 1000
+        candidate_key = generate_premium_key()
+        candidate_key_hash = sha256_key(candidate_key)
+        candidate_pid = purchase_id()
+        candidate_encrypted_key = encrypt_key(candidate_key)
+
+        try:
+            ok, record, reason = await asyncio.to_thread(
+                consume_free_claim,
+                claim_hash,
+                user.id,
+                candidate_pid,
+                candidate_key_hash,
+                candidate_encrypted_key,
+                expires_at,
+            )
+        except Exception:
+            logger.exception("Free claim transaction failed for Telegram user %s", user.id)
+            await update.message.reply_text(UI.text("free_access", field="error"), parse_mode=ParseMode.HTML)
+            return
+
+        if not ok or not record:
+            field = "already_used" if reason == "already_used" else "expired" if reason == "expired" else "invalid"
+            await update.message.reply_text(UI.text("free_access", field=field), parse_mode=ParseMode.HTML)
+            return
+
+        # If this claim was already consumed by the same user, recover the
+        # exact previously-issued key instead of creating another one.
+        pid = str(record.get("issued_purchase_id", candidate_pid))
+        key_hash = str(record.get("issued_key_hash", candidate_key_hash))
+        encrypted_key = str(record.get("issued_encrypted_key", candidate_encrypted_key))
+        expires_at = int(record.get("issued_expires_at", expires_at))
+        raw_key = decrypt_key(encrypted_key)
+
+        existing_purchase = await asyncio.to_thread(fb_get, f"purchases/{pid}")
+        if not existing_purchase:
+            purchase = {
+                "telegram_id": user.id,
+                "order_id": None,
+                "product_id": "website",
+                "plan_id": "free_1_hour",
+                "plan_name": "Free 1 Hour",
+                "amount": 0,
+                "key_hash": key_hash,
+                "encrypted_key": encrypted_key,
+                "purchased_at": int(record.get("used_at", issued_at)),
+                "expires_at": expires_at,
+                "status": "active",
+                "access_type": "free_shortlink",
+                "claim_hash": claim_hash,
+            }
+            updates = {
+                f"purchases/{pid}": purchase,
+                f"key_verification/{key_hash}": {
+                    "status": "active",
+                    "product_id": "website",
+                    "expires_at": expires_at,
+                    "access_type": "free_shortlink",
+                    "telegram_id": user.id,
+                    "claim_hash": claim_hash,
+                },
+                f"users/{user.id}/last_seen_at": issued_at,
+            }
+            try:
+                await asyncio.to_thread(db.reference("/").update, updates)
+            except Exception:
+                logger.exception("Failed to persist free premium key for %s", user.id)
+                await update.message.reply_text(UI.text("free_access", field="error"), parse_mode=ParseMode.HTML)
+                return
+
+        expires_text = datetime.fromtimestamp(expires_at / 1000, timezone.utc).strftime("%d %b %Y %H:%M UTC")
+        await update.message.reply_text(
+            UI.text("free_access", field="success", values={"key": raw_key, "expires_at": expires_text}),
+            parse_mode=ParseMode.HTML,
+            reply_markup=UI.payment_approved_keyboard(product_url(await asyncio.to_thread(get_product, "website") or {})),
+        )
+        return
+
     await update.message.reply_text(
         UI.text("welcome"),
         parse_mode=ParseMode.HTML,
-        reply_markup=UI.keyboard("welcome"),
+        reply_markup=UI.keyboard("welcome", admin_mode=is_admin(user.id)),
     )
 
 
@@ -317,7 +539,7 @@ async def show_home(query) -> None:
     await query.edit_message_text(
         UI.text("welcome"),
         parse_mode=ParseMode.HTML,
-        reply_markup=UI.keyboard("welcome"),
+        reply_markup=UI.keyboard("welcome", admin_mode=is_admin(query.from_user.id)),
     )
 
 
@@ -340,7 +562,7 @@ async def show_product(query, product_id: str) -> None:
     await query.edit_message_text(
         UI.text("product", values),
         parse_mode=ParseMode.HTML,
-        reply_markup=plans_menu(product, update.effective_user.id),
+        reply_markup=plans_menu(product, query.from_user.id),
     )
 
 
@@ -1065,12 +1287,15 @@ async def show_orders(query) -> None:
 
         # UI.py owns the keyboard. bot.py only prepares data.
         for purchase in active_purchases:
-            plan = await asyncio.to_thread(
-                get_plan,
-                purchase.get("product_id", "website"),
-                purchase.get("plan_id", ""),
-            )
-            purchase["plan_name"] = (plan or {}).get("name", purchase.get("plan_id", "Premium"))
+            if purchase.get("access_type") == "free_shortlink":
+                purchase["plan_name"] = purchase.get("plan_name", "Free 1 Hour")
+            else:
+                plan = await asyncio.to_thread(
+                    get_plan,
+                    purchase.get("product_id", "website"),
+                    purchase.get("plan_id", ""),
+                )
+                purchase["plan_name"] = (plan or {}).get("name", purchase.get("plan_id", "Premium"))
 
         if active_purchases:
             message = UI.text("my_orders", field="text_active")
@@ -1118,6 +1343,8 @@ async def show_purchase_detail(query, purchase_id_value: str) -> None:
         plan = await asyncio.to_thread(get_plan, product_id, plan_id)
         product = await asyncio.to_thread(get_product, product_id)
 
+        plan_name = purchase.get("plan_name") if purchase.get("access_type") == "free_shortlink" else (plan or {}).get("name", plan_id or "Premium")
+
         expires_text = datetime.fromtimestamp(
             expires_at / 1000, timezone.utc
         ).strftime("%d %b %Y %H:%M UTC")
@@ -1125,7 +1352,7 @@ async def show_purchase_detail(query, purchase_id_value: str) -> None:
         values = {
             "purchase_id": purchase_id_value,
             "order_id": purchase.get("order_id", ""),
-            "plan_name": (plan or {}).get("name", plan_id or "Premium"),
+            "plan_name": plan_name,
             "amount": purchase.get("amount", 0),
             "key": raw_key,
             "expires_at": expires_text,
@@ -1209,6 +1436,22 @@ async def dispatch_action(query, context: ContextTypes.DEFAULT_TYPE, data: str, 
         await show_home(query); return
     if data == "product:website":
         await show_product(query, "website"); return
+    if data == "free:claim":
+        # TEMPORARY TEST MODE: only the configured admin can create free claims.
+        if not is_admin(user.id):
+            await query.answer("Admin-only test access.", show_alert=True)
+            return
+        try:
+            verify_url = await create_free_claim(user)
+            await query.message.reply_text(
+                UI.text("free_access", field="created"),
+                parse_mode=ParseMode.HTML,
+                reply_markup=UI.keyboard("free_access", {"verify_url": verify_url}),
+            )
+        except Exception:
+            logger.exception("Failed to create free claim for Telegram user %s", user.id)
+            await query.message.reply_text(UI.text("free_access", field="error"), parse_mode=ParseMode.HTML)
+        return
     if data in {"orders", "my_orders"}:
         await show_orders(query); return
     if data == "support":
@@ -1267,6 +1510,18 @@ async def expire_due_records(context: ContextTypes.DEFAULT_TYPE) -> None:
                     updates[f"orders/{oid}/updated_at"] = now
             if updates:
                 await asyncio.to_thread(db.reference("/").update, updates)
+
+        # Expire unused free shortlink claims.
+        pending_claims = await asyncio.to_thread(
+            lambda: db.reference("free_claims").order_by_child("status").equal_to("pending").get() or {}
+        )
+        claim_updates = {}
+        for claim_hash, claim in pending_claims.items():
+            if int(claim.get("expires_at", 0)) <= now:
+                claim_updates[f"free_claims/{claim_hash}/status"] = "expired"
+                claim_updates[f"free_claims/{claim_hash}/expired_at"] = now
+        if claim_updates:
+            await asyncio.to_thread(db.reference("/").update, claim_updates)
 
         # Expire premium purchases and website verification records.
         active_purchases = await asyncio.to_thread(
