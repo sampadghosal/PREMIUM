@@ -1,0 +1,77 @@
+
+name: Silent Premium Bot Watchdog
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: silent-premium-watchdog
+  cancel-in-progress: true
+
+jobs:
+  check-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Check and restart bot if stopped
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          echo "Checking Silent Premium Bot..."
+
+          WORKFLOW_PATH=$(
+            gh workflow list --all --json name,path |
+            jq -r '.[] |
+              select(.name == "Run Silent Premium Bot") |
+              .path' |
+            head -n 1
+          )
+
+          if [ -z "$WORKFLOW_PATH" ]; then
+            echo "ERROR: Main bot workflow not found."
+            exit 1
+          fi
+
+          WORKFLOW_FILE="${WORKFLOW_PATH##*/}"
+
+          echo "Main workflow: $WORKFLOW_FILE"
+
+          ACTIVE_RUNS=$(
+            gh api \
+              "repos/$REPO/actions/workflows/$WORKFLOW_FILE/runs?per_page=100" |
+            jq '[
+              .workflow_runs[] |
+              select(
+                .status == "queued" or
+                .status == "in_progress" or
+                .status == "waiting" or
+                .status == "requested" or
+                .status == "pending"
+              )
+            ] | length'
+          )
+
+          echo "Active runs: $ACTIVE_RUNS"
+
+          if [ "$ACTIVE_RUNS" -gt 0 ]; then
+            echo "Bot workflow is active. No restart needed."
+            exit 0
+          fi
+
+          echo "No active bot run found. Dispatching restart..."
+
+          gh api --method POST \
+            "repos/$REPO/actions/workflows/$WORKFLOW_FILE/dispatches" \
+            -f ref=main
+
+          echo "Restart request sent."
